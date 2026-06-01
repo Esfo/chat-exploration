@@ -145,3 +145,5 @@ for token, tokenid in identifiersbytoken.items():
         break
 
 print('token fitting end', time() - nt)
+
+#end token count is huge, like 2.8 million off gutenberg alone, but i'm gonna roll with it
