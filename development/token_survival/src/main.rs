@@ -320,6 +320,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let survival_seconds = nt.elapsed().as_secs_f64();
     println!("token survival game end {}", survival_seconds);
 
+    let alive_count = interner.alive.iter().filter(|a| **a).count();
+    println!("total tokens: {}", alive_count);
+    println!("total words: {}", tokencache.len());
+
     let nt = Instant::now();
     println!("middle sort start");
 
