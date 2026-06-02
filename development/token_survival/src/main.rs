@@ -154,14 +154,16 @@ impl Interner {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = env::args().collect();
-    if args.len() != 4 {
-        eprintln!("usage: token_survival <finaltext.jsonl> <config.json> <outputfolder>");
+    if args.len() < 4 || args.len() > 5 {
+        eprintln!("usage: token_survival <finaltext.jsonl> <config.json> <outputfolder> [coverage:0|1]");
         std::process::exit(1);
     }
 
     let finaltextpath = PathBuf::from(&args[1]);
     let configpath = PathBuf::from(&args[2]);
     let outputfolder = PathBuf::from(&args[3]);
+    // optional 4th arg toggles the word-completion (coverage) test; defaults on
+    let run_coverage = args.get(4).map(|s| s != "0").unwrap_or(true);
     create_dir_all(&outputfolder)?;
 
     let config: Config = serde_json::from_reader(File::open(configpath)?)?;
@@ -375,6 +377,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let middle_sort_seconds = nt.elapsed().as_secs_f64();
     println!("middle sort finished {}", middle_sort_seconds);
 
+    if run_coverage {
     let coverage_nt = Instant::now();
     println!("token coverage test start");
 
@@ -439,6 +442,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("percent covered: {}", percent_covered);
     println!("uncovered words: {}", uncovered);
     println!("token coverage test end {}", coverage_seconds);
+    }
 
     let mut out = BufWriter::new(File::create(outputfolder.join("middle_tokens.jsonl"))?);
     for id in &middle {

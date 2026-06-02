@@ -7,7 +7,7 @@ import subprocess
 RUST_PROJECT = Path(__file__).resolve().parent / 'development' / 'token_survival'
 
 
-def create_tokens(paragraphs, output_path, survival_rounds=50):
+def create_tokens(paragraphs, output_path, survival_rounds=50, run_coverage_test=True):
     """Run the rust token survival binary on the given paragraphs.
     Writes middle_tokens.jsonl into output_path and returns its Path."""
     output_path = Path(output_path)
@@ -43,7 +43,8 @@ def create_tokens(paragraphs, output_path, survival_rounds=50):
 
     subprocess.run(
         ['cargo', 'run', '--release', '--',
-         str(finaltextpath), str(configpath), str(output_path)],
+         str(finaltextpath), str(configpath), str(output_path),
+         '1' if run_coverage_test else '0'],
         cwd=RUST_PROJECT, check=True,
     )
 
