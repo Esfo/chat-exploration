@@ -11,6 +11,8 @@ from pathlib import Path
 #i had prior to this filtered out entire files that don't conform to english text or the characters im using
 
 folder = '/home/sfo/store/gutenberg/gutenbooks/'
+outputfolder = '/home/sfo/data/models/tokens/'
+
 files = os.listdir(folder)
 
 encodings = ["utf-8-sig", "cp1252", "iso-8859-1"]
