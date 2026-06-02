@@ -8,7 +8,7 @@ survival_rounds = 50
 #=== switches: comment out the line you don't want; the active line wins ===
 
 #token output: a full file path writes the jsonl there, False skips it
-token_output = '/home/sfo/data/models/tokens/middle_tokens.jsonl'
+token_output = '/home/sfo/data/models/tokens/survival-tokens.jsonl'
 #token_output = False
 
 #word-completion (coverage) test: prints how many words the tokens can rebuild
@@ -21,9 +21,6 @@ print_token_count = False
 
 
 #=== pipeline ===
-if len(sys.argv) < 2:
-    print('usage: python main.py <file-or-folder>')
-    sys.exit(1)
 
 input_path = sys.argv[1]
 
