@@ -7,8 +7,8 @@ survival_rounds = 50
 
 #=== switches: comment out the line you don't want; the active line wins ===
 
-#token output location: a string path writes the jsonl there, False skips it
-token_output = '/home/sfo/data/models/tokens/'
+#token output: a full file path writes the jsonl there, False skips it
+token_output = '/home/sfo/data/models/tokens/middle_tokens.jsonl'
 #token_output = False
 
 #word-completion (coverage) test: prints how many words the tokens can rebuild
@@ -32,7 +32,7 @@ paragraphs = read_input(input_path)
 if token_output:
     output_file = create_tokens(
         paragraphs,
-        output_path=token_output,
+        output_file=token_output,
         survival_rounds=survival_rounds,
         run_coverage_test=run_coverage_test,
     )

@@ -7,13 +7,14 @@ import subprocess
 RUST_PROJECT = Path(__file__).resolve().parent / 'token_survival'
 
 
-def create_tokens(paragraphs, output_path, survival_rounds=50, run_coverage_test=True):
+def create_tokens(paragraphs, output_file, survival_rounds=50, run_coverage_test=True):
     """Run the rust token survival binary on the given paragraphs.
-    Writes middle_tokens.jsonl into output_path and returns its Path."""
-    output_path = Path(output_path)
+    Writes the jsonl to output_file (full path, name designated by the caller)
+    and returns its Path."""
+    output_file = Path(output_file)
     datafolder = RUST_PROJECT / 'data'
     datafolder.mkdir(exist_ok=True)
-    output_path.mkdir(parents=True, exist_ok=True)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
 
     spaces = list(string.whitespace)
     punctuation = list(string.punctuation) + ['—']
@@ -43,11 +44,11 @@ def create_tokens(paragraphs, output_path, survival_rounds=50, run_coverage_test
 
     subprocess.run(
         ['cargo', 'run', '--release', '--',
-         str(finaltextpath), str(configpath), str(output_path),
+         str(finaltextpath), str(configpath), str(output_file),
          '1' if run_coverage_test else '0'],
         cwd=RUST_PROJECT, check=True,
     )
 
     print('token survival end', time() - nt)
 
-    return output_path / 'middle_tokens.jsonl'
+    return output_file
