@@ -91,10 +91,10 @@ print('rust handoff start')
 
 project = Path(__file__).resolve().parent
 datafolder = project / 'data'
-outputfolder = project / 'output'
+outputfolder = Path('/home/sfo/data/models/tokens/')
 
 datafolder.mkdir(exist_ok=True)
-outputfolder.mkdir(exist_ok=True)
+outputfolder.mkdir(parents=True, exist_ok=True)
 
 wordsplits = spaces + ['--'] + punctuation
 wordsplits = sorted(set(wordsplits), key=len, reverse=True)
