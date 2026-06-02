@@ -233,11 +233,18 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         let parts = split_with_seps(tb, &first_byte, &splits);
 
-        // wordcounts in first-encounter order
+        // wordcounts in first-encounter order; whitespace-only parts are excluded so
+        // \n, \t, etc. never enter the cache and ' ' is only counted via the explicit
+        // survivors[' '] += text.count(' ') above.
         let mut wc_order: Vec<&[u8]> = Vec::new();
         let mut wc_counts: HashMap<&[u8], i64> = HashMap::new();
         for part in parts {
             if part.is_empty() {
+                continue;
+            }
+            // SAFETY: parts are byte ranges of valid utf-8 text at codepoint boundaries
+            let part_str = unsafe { std::str::from_utf8_unchecked(part) };
+            if part_str.chars().all(|c| c.is_whitespace()) {
                 continue;
             }
             match wc_counts.get_mut(part) {
@@ -316,16 +323,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let nt = Instant::now();
     println!("middle sort start");
 
-    let keep = |s: &str| -> bool {
-        if s == " " {
-            return true;
-        }
-        !s.chars().any(|c| c.is_whitespace())
-    };
-
     let mut alive_list: Vec<(u32, i64)> = (0..interner.strs.len() as u32)
         .filter(|&id| interner.alive[id as usize])
-        .filter(|&id| keep(&interner.strs[id as usize]))
         .map(|id| (id, interner.survivors[id as usize]))
         .collect();
     // descending count, then ascending insertion order — matches Python's stable sort
@@ -361,7 +360,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         .enumerate()
         .filter(|(i, _)| interner.alive[*i])
         .map(|(_, s)| s.as_str())
-        .filter(|s| keep(s))
         .collect();
 
     println!("total tokens: {}", token_set.len());
