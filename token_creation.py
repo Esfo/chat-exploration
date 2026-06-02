@@ -4,7 +4,7 @@ import json
 import string
 import subprocess
 
-RUST_PROJECT = Path(__file__).resolve().parent / 'development' / 'token_survival'
+RUST_PROJECT = Path(__file__).resolve().parent / 'token_survival'
 
 
 def create_tokens(paragraphs, output_path, survival_rounds=50, run_coverage_test=True):
