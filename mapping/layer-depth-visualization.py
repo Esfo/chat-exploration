@@ -1,4 +1,4 @@
-# layer-depth-visualization.py
+#layer-depth-visualization.py
 
 from pathlib import Path
 from collections import Counter
@@ -12,52 +12,52 @@ import matplotlib.pyplot as plt
 from gguf import GGUFReader
 
 
-# ============================================================
-# EDIT THESE
-# ============================================================
+#============================================================
+#EDIT THESE
+#============================================================
 
 MODEL_OR_PATH = "llama3:8b"
 
-# Pick one tensor role to compare across blocks.
-# Good options:
-#   "attn_q.weight"
-#   "attn_k.weight"
-#   "attn_v.weight"
-#   "attn_output.weight"
-#   "ffn_gate.weight"
-#   "ffn_up.weight"
-#   "ffn_down.weight"
-#   "attn_norm.weight"
-#   "ffn_norm.weight"
+#Pick one tensor role to compare across blocks.
+#Good options:
+#"attn_q.weight"
+#"attn_k.weight"
+#"attn_v.weight"
+#"attn_output.weight"
+#"ffn_gate.weight"
+#"ffn_up.weight"
+#"ffn_down.weight"
+#"attn_norm.weight"
+#"ffn_norm.weight"
 TENSOR_SUFFIX = "attn_q.weight"
 
-# Use specific blocks:
+#Use specific blocks:
 BLOCKS_TO_PLOT = [0, 8, 16, 24, 31]
 
-# Or use every block:
-# BLOCKS_TO_PLOT = "all"
+#Or use every block:
+#BLOCKS_TO_PLOT = "all"
 
-# For 2D tensors, plot this row from each tensor.
+#For 2D tensors, plot this row from each tensor.
 ROW_INDEX = 0
 
-# Plot this many values from the row.
+#Plot this many values from the row.
 VALUES_TO_PLOT = 250
 
-# Start offset inside the row/vector.
+#Start offset inside the row/vector.
 START_AT = 0
 
-# True makes each line show shape rather than absolute scale.
-# Useful when lines are visually too close together.
+#True makes each line show shape rather than absolute scale.
+#Useful when lines are visually too close together.
 NORMALIZE_EACH_LINE = False
 
-# Optional: save the figure.
+#Optional: save the figure.
 SAVE_FIGURE = False
 OUTPUT_IMAGE = "layer-depth-plot.png"
 
 
-# ============================================================
-# FIND GGUF FILE
-# ============================================================
+#============================================================
+#FIND GGUF FILE
+#============================================================
 
 model_path = Path(MODEL_OR_PATH).expanduser()
 ollama_models_dir = Path(os.environ.get("OLLAMA_MODELS", Path.home() / ".ollama" / "models"))
@@ -156,9 +156,9 @@ else:
     gguf_path = max(gguf_candidates, key=lambda p: p.stat().st_size)
 
 
-# ============================================================
-# OPEN MODEL
-# ============================================================
+#============================================================
+#OPEN MODEL
+#============================================================
 
 reader = GGUFReader(str(gguf_path))
 
@@ -171,9 +171,9 @@ print(f"Total tensors: {len(reader.tensors)}")
 print()
 
 
-# ============================================================
-# FIND MATCHING TENSORS
-# ============================================================
+#============================================================
+#FIND MATCHING TENSORS
+#============================================================
 
 all_block_ids = []
 
@@ -224,9 +224,9 @@ if missing:
     raise KeyError(f"Some requested tensors do not exist for suffix: {TENSOR_SUFFIX}")
 
 
-# ============================================================
-# DEQUANTIZE ONE TENSOR AT A TIME AND PLOT
-# ============================================================
+#============================================================
+#DEQUANTIZE ONE TENSOR AT A TIME AND PLOT
+#============================================================
 
 float_or_int_types = {
     "F32", "F16", "F64", "BF16",

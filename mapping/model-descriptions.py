@@ -1,4 +1,4 @@
-# layer-visualization.py
+#layer-visualization.py
 
 from pathlib import Path
 from collections import defaultdict, Counter
@@ -10,29 +10,29 @@ import numpy as np
 from gguf import GGUFReader
 
 
-# Change this.
-# Examples:
-# MODEL_OR_PATH = "llama3:8b"
-# MODEL_OR_PATH = "llama3:latest"
-# MODEL_OR_PATH = "/Users/you/.ollama/models/blobs/sha256-abc..."
-# MODEL_OR_PATH = "/path/to/folder/with/gguf"
+#Change this.
+#Examples:
+#MODEL_OR_PATH = "llama3:8b"
+#MODEL_OR_PATH = "llama3:latest"
+#MODEL_OR_PATH = "/Users/you/.ollama/models/blobs/sha256-abc..."
+#MODEL_OR_PATH = "/path/to/folder/with/gguf"
 MODEL_OR_PATH = "llama3:8b"
 
-# Keep this False at first. True samples/dequantizes a tiny part of each tensor.
+#Keep this False at first. True samples/dequantizes a tiny part of each tensor.
 PROBE_VALUES = False
 
-# Only used when PROBE_VALUES = True.
+#Only used when PROBE_VALUES = True.
 SAMPLE_ROWS = 2
 MAX_1D_VALUES = 4096
 
-# Use 0 to show every tensor in every layer.
+#Use 0 to show every tensor in every layer.
 MAX_TENSORS_PER_LAYER = 0
 
 
 model_path = Path(MODEL_OR_PATH).expanduser()
 ollama_models_dir = Path(os.environ.get("OLLAMA_MODELS", Path.home() / ".ollama" / "models"))
 
-# Resolve MODEL_OR_PATH into an actual GGUF file.
+#Resolve MODEL_OR_PATH into an actual GGUF file.
 if model_path.exists():
     if model_path.is_dir():
         ggufs = sorted(model_path.rglob("*.gguf"), key=lambda p: p.stat().st_size, reverse=True)
@@ -59,17 +59,17 @@ else:
 
         possible_names = set()
 
-        # Usually:
-        # registry.ollama.ai/library/llama3/8b -> llama3:8b
+        #Usually:
+        #registry.ollama.ai/library/llama3/8b -> llama3:8b
         if len(parts) >= 4 and parts[1] == "library":
             possible_names.add(f"{parts[2]}:{parts[3]}")
 
-        # Namespaced:
-        # registry.ollama.ai/user/model/tag -> user/model:tag
+        #Namespaced:
+        #registry.ollama.ai/user/model/tag -> user/model:tag
         if len(parts) >= 4 and parts[1] != "library":
             possible_names.add(f"{parts[1]}/{parts[2]}:{parts[3]}")
 
-        # Fallback:
+        #Fallback:
         if len(parts) >= 2:
             possible_names.add(f"{parts[-2]}:{parts[-1]}")
 
