@@ -1,183 +1,54 @@
-from collections import Counter, defaultdict
 from time import time
-import itertools
+from pathlib import Path
+import json
 import string
-import os
-import re
+import subprocess
+
+RUST_PROJECT = Path(__file__).resolve().parent / 'token_survival'
 
 
-def find_index(word, target):
-    start = 0
-    indices = []
-    tlen = len(target)
-    while True:
-        i = word.find(target, start)
-        if i == -1:
-            break
-        indices.append([i,i+tlen])
-        start = i + 1
-    return indices
+def create_tokens(paragraphs, output_file, survival_rounds=50, run_coverage_test=True):
+    """Run the rust token survival binary on the given paragraphs.
+    Writes the jsonl to output_file (full path, name designated by the caller)
+    and returns its Path."""
+    output_file = Path(output_file)
+    datafolder = RUST_PROJECT / 'data'
+    datafolder.mkdir(exist_ok=True)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
 
-def word_processing(folder):
-    
-    files = os.listdir(folder)
-
-    encodings = ["utf-8-sig", "cp1252", "iso-8859-1"]
-
-    digits = list(string.digits)
-    spaces = list(string.whitespace) #replace these prior i guess
+    spaces = list(string.whitespace)
     punctuation = list(string.punctuation) + ['—']
-    newline = ['\n']
+    endpunctuation = ['.', '!', '?']
 
-    pretokens = digits + spaces + punctuation + newline
-    pattern = '(' + '|'.join(re.escape(char) for char in pretokens) + ')'
+    wordsplits = spaces + ['--'] + punctuation
+    wordsplits = sorted(set(wordsplits), key=len, reverse=True)
 
+    config = {
+        'survivalrounds': survival_rounds,
+        'wordsplits': wordsplits,
+        'endpunctuation': endpunctuation,
+    }
 
-    nt = time()
-    print('file reading start')
-
-    wordcounts = Counter()
-    for file in files:
-        path = folder + file
-        for encoding in encodings:
-            try:
-                with open(path, "r", encoding=encoding) as f:
-                    text = f.read()
-                break
-            except UnicodeDecodeError:
-                continue
-        else:
-            raise UnicodeError(f"Could not decode file: {filename}")
-
-        text = re.sub(r"\n+", lambda m: " " if len(m.group(0)) == 1 else m.group(0), text)
-        wordcounts += Counter(part for part in re.split(pattern, text) if part)
-
-    print('file reading end', time() - nt)
-
-    return wordcounts
-
-def token_drafting(wordcounts):
-    
-    nt = time()
-    print('token drafting start')
-
-    wordsbytoken = defaultdict(set) #token: [words]
-    combinationcounts = Counter()
-    for word, count in wordcounts.items():
-        if len(word) > 1:
-            #every combination of adjacent letters of a word broken into pieces
-            for size in range(2, len(word) + 1):
-                for start in range(0, len(word) - size + 1):
-                    token = word[start:start + size]
-                    combinationcounts[token] += count
-                    wordsbytoken[token].add(word)
-        else:
-            combinationcounts[word] += count
-            wordsbytoken[word].add(word)
-
-    print('token drafting end', time() - nt)
+    finaltextpath = datafolder / 'finaltext.jsonl'
+    configpath = datafolder / 'config.json'
 
     nt = time()
-    print('token drafting cleanup start')
+    print('token survival start')
 
-    for k in wordsbytoken:
-        wordsbytoken[k] = tuple(wordsbytoken[k])
+    with open(finaltextpath, 'w', encoding='utf-8') as f:
+        for paragraph in paragraphs:
+            f.write(json.dumps(paragraph, ensure_ascii=False) + '\n')
 
-    wordsbytoken = dict(wordsbytoken)
-    wordcounts = list(wordcounts)
+    with open(configpath, 'w', encoding='utf-8') as f:
+        json.dump(config, f, ensure_ascii=False)
 
-    tokensbyidentifier = {} #tokenid: token
-    identifiersbytoken = {} #token: tokenid
-    for n, (combination, counts) in enumerate(combinationcounts.most_common(len(combinationcounts))):
-        tokensbyidentifier[n] = combination
-        identifiersbytoken[combination] = n
+    subprocess.run(
+        ['cargo', 'run', '--release', '--',
+         str(finaltextpath), str(configpath), str(output_file),
+         '1' if run_coverage_test else '0'],
+        cwd=RUST_PROJECT, check=True,
+    )
 
-    print('end token drafting cleanup', time() - nt)
+    print('token survival end', time() - nt)
 
-    return combinationcounts, wordsbytoken, wordcounts, tokensbyidentifier, identifiersbytoken
-
-
-def token_fitting(combinationcounts, wordsbytoken, wordcounts, tokensbyidentifier, identifiersbytoken):
-    
-    nt = time()
-    print('token fitting start')
-
-    wordedges = defaultdict(lambda: defaultdict(list)) #word: startindex: [(endindex, tokenid), ...]
-
-    coveredwords = set() #words with a completed token path
-
-    coveragegoal = len(wordcounts) #stopping point
-    allowedtokens = [] #final token set
-
-    rounds = 0
-    for token, tokenid in identifiersbytoken.items():
-        rounds += 1
-        allowedtokens.append(token)
-
-        changedwords = set() #words whose edge map changed because this token was just added
-
-        #mapping potential tokens to their appropriate starting points
-        #Katherine: 2=t: [(endindex=4, th) (endindex=5, the)
-        for word in wordsbytoken[token]:
-            if word in coveredwords:
-                continue
-            for start, end in find_index(word, token):
-                edge = (end, tokenid)
-
-                if edge not in wordedges[word][start]:
-                    wordedges[word][start].append(edge)
-                    changedwords.add(word)
-
-        #rebuild coverage for words affected by the newly added token
-        for word in changedwords:
-            wlen = len(word)
-            stack = [(0, [])]
-            foundcoverage = False
-
-            #walk forward through token edges; a valid path must start at 0 and end at len(word)
-            while stack and not foundcoverage:
-                position, tokenpath = stack.pop()
-
-                if position == wlen:
-                    foundcoverage = True
-                    continue
-
-                for end, nexttokenid in wordedges[word].get(position, []):
-                    stack.append((end, tokenpath + [nexttokenid]))
-
-            if foundcoverage:
-                coveredwords.add(word)
-
-        if len(coveredwords) == coveragegoal:
-            print(rounds, '/', len(identifiersbytoken), 'total token rounds')
-            break
-
-    print('token fitting end', time() - nt)
-
-    return tuple(allowedtokens)
-
-def create_tokens(folder):
-    return token_fitting(*token_drafting(word_processing(folder)))
-
-def text_processing(text):
-    
-    digits = list(string.digits)
-    spaces = list(string.whitespace) #replace these prior i guess
-    punctuation = list(string.punctuation) + ['—']
-    newline = ['\n']
-
-    pretokens = digits + spaces + punctuation + newline
-    pattern = '(' + '|'.join(re.escape(char) for char in pretokens) + ')'
-
-
-    nt = time()
-    print('text processing start')
-
-    text = re.sub(r"\n+", lambda m: " " if len(m.group(0)) == 1 else m.group(0), text)
-    wordcounts = Counter(part for part in re.split(pattern, text) if part)
-
-    print('text processing end', time() - nt)
-
-    return token_fitting(*token_drafting(wordcounts))
-
-text = "Lorem Ipsum is simply dummy text of the printing and typesetting industry. Lorem Ipsum has been the industry's standard dummy text ever since 1966, when designers at Letraset and James Mosley, the librarian at St Bride Printing Library, took a 1914 Cicero translation and scrambled it to make dummy text for Letraset's Body Type sheets. It has survived not only many decades, but also the leap into electronic typesetting, remaining essentially unchanged. It was popularised thanks to these sheets and more recently with desktop publishing software including versions of Lorem Ipsum."
+    return output_file

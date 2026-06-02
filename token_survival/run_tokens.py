@@ -29,7 +29,7 @@ pattern = '(' + '|'.join(re.escape(char) for char in pretokens) + ')'
 survivalrounds = 50
 
 nt = time()
-print('token drafting start')
+print('file reading start')
 
 finaltext = []
 for file in files:
@@ -84,17 +84,17 @@ for file in files:
                 if 0.7 > sentenceratio > 0.3 and caseratio > 0.7:
                     finaltext.append(paragraph)
 
-print('token drafting end', time() - nt)
+print('file reading end', time() - nt)
 
 nt = time()
 print('rust handoff start')
 
 project = Path(__file__).resolve().parent
 datafolder = project / 'data'
-outputfolder = project / 'output'
+outputfile = Path('/home/sfo/data/models/tokens/middle_tokens.jsonl')
 
 datafolder.mkdir(exist_ok=True)
-outputfolder.mkdir(exist_ok=True)
+outputfile.parent.mkdir(parents=True, exist_ok=True)
 
 wordsplits = spaces + ['--'] + punctuation
 wordsplits = sorted(set(wordsplits), key=len, reverse=True)
@@ -123,7 +123,7 @@ subprocess.run(
         '--',
         str(finaltextpath),
         str(configpath),
-        str(outputfolder),
+        str(outputfile),
     ],
     cwd=project,
     check=True,
