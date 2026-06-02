@@ -316,8 +316,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     let nt = Instant::now();
     println!("middle sort start");
 
+    let keep = |s: &str| -> bool {
+        if s == " " {
+            return true;
+        }
+        !s.chars().any(|c| c.is_whitespace())
+    };
+
     let mut alive_list: Vec<(u32, i64)> = (0..interner.strs.len() as u32)
         .filter(|&id| interner.alive[id as usize])
+        .filter(|&id| keep(&interner.strs[id as usize]))
         .map(|id| (id, interner.survivors[id as usize]))
         .collect();
     // descending count, then ascending insertion order — matches Python's stable sort
@@ -353,6 +361,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .enumerate()
         .filter(|(i, _)| interner.alive[*i])
         .map(|(_, s)| s.as_str())
+        .filter(|s| keep(s))
         .collect();
 
     println!("total tokens: {}", token_set.len());
