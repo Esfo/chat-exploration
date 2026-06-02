@@ -24,7 +24,7 @@ pattern = '(' + '|'.join(re.escape(char) for char in pretokens) + ')'
 survivalrounds = 50
 
 nt = time()
-print('token drafting start')
+print('file reading start')
 
 finaltext = []
 for file in files:
@@ -79,7 +79,7 @@ for file in files:
                 if 0.7 > sentenceratio > 0.3 and caseratio > 0.7:
                     finaltext.append(paragraph)
 
-print('token drafting end', time() - nt)
+print('file reading end', time() - nt)
 
 
 nt = time()
