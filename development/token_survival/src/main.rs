@@ -113,6 +113,8 @@ struct Interner {
     survivors: Vec<i64>,
     misses: Vec<i64>,
     alive: Vec<bool>,
+    positions: Vec<u32>,
+    next_position: u32,
 }
 
 impl Interner {
@@ -123,6 +125,8 @@ impl Interner {
             survivors: Vec::new(),
             misses: Vec::new(),
             alive: Vec::new(),
+            positions: Vec::new(),
+            next_position: 0,
         }
     }
 
@@ -137,7 +141,14 @@ impl Interner {
         self.survivors.push(0);
         self.misses.push(0);
         self.alive.push(true);
+        self.positions.push(self.next_position);
+        self.next_position += 1;
         id
+    }
+
+    fn bump_position(&mut self, id: u32) {
+        self.positions[id as usize] = self.next_position;
+        self.next_position += 1;
     }
 }
 
@@ -284,10 +295,20 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
         }
 
-        // apply modifications to survivors
+        // apply modifications to survivors; if a token previously "died" but its
+        // substring reappears, resurrect it (matches Python's del+recreate semantics:
+        // survivors[token] is reset to the new count, misses is cleared, and the
+        // token's dict-insertion position moves to the end for tie-breaking)
         for &id in &touched {
             let idu = id as usize;
-            interner.survivors[idu] += modifications[idu];
+            if !interner.alive[idu] {
+                interner.alive[idu] = true;
+                interner.survivors[idu] = modifications[idu];
+                interner.misses[idu] = 0;
+                interner.bump_position(id);
+            } else {
+                interner.survivors[idu] += modifications[idu];
+            }
         }
 
         // cull every alive token
@@ -327,18 +348,19 @@ fn main() -> Result<(), Box<dyn Error>> {
     let nt = Instant::now();
     println!("middle sort start");
 
-    let mut alive_list: Vec<(u32, i64)> = (0..interner.strs.len() as u32)
+    let mut alive_list: Vec<(u32, i64, u32)> = (0..interner.strs.len() as u32)
         .filter(|&id| interner.alive[id as usize])
-        .map(|id| (id, interner.survivors[id as usize]))
+        .map(|id| (id, interner.survivors[id as usize], interner.positions[id as usize]))
         .collect();
-    // descending count, then ascending insertion order — matches Python's stable sort
-    alive_list.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    // descending count, then ascending current dict-insertion position — matches
+    // Python's stable sort over Counter.items() after potential del+reinsert
+    alive_list.sort_by(|a, b| b.1.cmp(&a.1).then(a.2.cmp(&b.2)));
 
     // middle-sort: odd indices to the left (in reverse), even indices to the right
     let n = alive_list.len();
     let mut odds: Vec<u32> = Vec::with_capacity(n / 2);
     let mut evens: Vec<u32> = Vec::with_capacity(n - n / 2);
-    for (i, (id, _)) in alive_list.iter().enumerate() {
+    for (i, (id, _, _)) in alive_list.iter().enumerate() {
         if i % 2 == 1 {
             odds.push(*id);
         } else {
