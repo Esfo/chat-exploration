@@ -10,12 +10,10 @@ input_path = '/home/sfo/store/gutenberg/gutenbooks/'
 token_output = '/home/sfo/data/models/tokens/survival-tokens.jsonl'
 #token_output = False
 
+token_input_file = '/home/sfo/data/models/tokens/survival-tokens.jsonl'
+
 token_word_coverage_test = True
 #token_word_coverage_test = False
-
-#print the final token count after writing
-#print_token_count = True
-print_token_count = False
 
 
 #=== pipeline ===
@@ -23,15 +21,13 @@ print_token_count = False
 paragraphs = read_input(input_path)
 
 if token_output:
-    output_file = create_tokens(
+    tokens_file = create_tokens(
         paragraphs,
         output_file=token_output,
         survival_rounds=survival_rounds,
         token_word_coverage_test=token_word_coverage_test,
     )
-    print('tokens written to', output_file)
-
-    if print_token_count:
-        with open(output_file, 'r', encoding='utf-8') as f:
-            count = sum(1 for _ in f)
-        print('token count:', count)
+    print('tokens written to', tokens_file)
+else:
+    tokens_file = token_input_file
+    print('using existing tokens at', tokens_file)
