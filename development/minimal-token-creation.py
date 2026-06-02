@@ -75,6 +75,52 @@ for word, count in wordcounts.items():
 print('token drafting end', time() - nt)
 
 
+#start at top and go down
+#that starts a head token in tier 1
+#pull next token -> is it a superset of anything in tier 1?
+    #if yes, it's not a head token, start tier 2, the hierarchy isn't necessary to remember in here
+        #all preceding new head tokens will now be tier 2
+    #if no, add as head token in tier 1
+#eventually tier 2 is made, and the process repeats
+    #next token pull:
+    #is it a superset of any individual things in the tier above?
+        #if yes -> check this same process in the next tier
+        #if yes -> it goes 1 tier below -> check again
+#more specifically, check if anything is a subset of the new pull, it doesn't need complete subsetedness, full coverage not required
+
+tokentiers = [set()]
+for t, c in combinationcounts.most_common(len(combinationcounts)):
+    tlen = len(t)
+    if tlen > 1:
+        finished = False
+        tierlen = len(tokentiers)
+        for n, tier in enumerate(tokentiers[tierhead:]):
+            parts = []
+            for size in range(2, tlen + 1):
+                for start in range(0, tlen - size + 1):
+                    part = t[start:start + size]
+                    parts.append(part)
+            if any(p in tier for p in parts):
+                if n + tierhead == tierlen - 1:
+                    newset = set([t])
+                    tokentiers.append(newset)
+                    tierhead = len(tokentiers) - 1
+                    finished = True
+                    break
+                #else:
+                    #move into deeper tier
+            else:
+                tokentiers[tierhead + n].add(t)
+                finished = True
+                break
+        if finished:
+            continue
+    else:
+        tokentiers[tierhead].add(t)
+
+tokenorder = list(itertools.chain.from_iterable(tokentiers))
+
+
 nt = time()
 print('token drafting cleanup start')
 
@@ -86,9 +132,9 @@ wordcounts = list(wordcounts)
 
 tokensbyidentifier = {} #tokenid: token
 identifiersbytoken = {} #token: tokenid
-for n, (combination, counts) in enumerate(combinationcounts.most_common(len(combinationcounts))):
-    tokensbyidentifier[n] = combination
-    identifiersbytoken[combination] = n
+for n, t in enumerate(tokenorder):
+    tokensbyidentifier[n] = t
+    identifiersbytoken[t] = n
 
 print('end token drafting cleanup', time() - nt)
 
@@ -104,7 +150,9 @@ coveragegoal = len(wordcounts) #stopping point
 allowedtokens = [] #final token set
 #wordcoverage = {} #word: [[ordered non-overlapping tokenid path], [...]]
 
+rounds = 0
 for token, tokenid in identifiersbytoken.items():
+    rounds += 1
     allowedtokens.append(tokenid)
 
     changedwords = set() #words whose edge map changed because this token was just added
@@ -142,8 +190,9 @@ for token, tokenid in identifiersbytoken.items():
             coveredwords.add(word)
 
     if len(coveredwords) == coveragegoal:
+        print(rounds, '/', len(identifiersbytoken), 'total token rounds')
         break
 
 print('token fitting end', time() - nt)
 
-#end token count is huge, like 2.8 million off gutenberg alone, but i'm gonna roll with it
+#end token count is huge, like 2.8 million off gutenberg alone, i'm gonna go bottom-up instead

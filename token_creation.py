@@ -56,7 +56,6 @@ def word_processing(folder):
 
     return wordcounts
 
-
 def token_drafting(wordcounts):
     
     nt = time()
@@ -110,7 +109,9 @@ def token_fitting(combinationcounts, wordsbytoken, wordcounts, tokensbyidentifie
     coveragegoal = len(wordcounts) #stopping point
     allowedtokens = [] #final token set
 
+    rounds = 0
     for token, tokenid in identifiersbytoken.items():
+        rounds += 1
         allowedtokens.append(token)
 
         changedwords = set() #words whose edge map changed because this token was just added
@@ -148,6 +149,7 @@ def token_fitting(combinationcounts, wordsbytoken, wordcounts, tokensbyidentifie
                 coveredwords.add(word)
 
         if len(coveredwords) == coveragegoal:
+            print(rounds, '/', len(identifiersbytoken), 'total token rounds')
             break
 
     print('token fitting end', time() - nt)
@@ -156,3 +158,26 @@ def token_fitting(combinationcounts, wordsbytoken, wordcounts, tokensbyidentifie
 
 def create_tokens(folder):
     return token_fitting(*token_drafting(word_processing(folder)))
+
+def text_processing(text):
+    
+    digits = list(string.digits)
+    spaces = list(string.whitespace) #replace these prior i guess
+    punctuation = list(string.punctuation) + ['—']
+    newline = ['\n']
+
+    pretokens = digits + spaces + punctuation + newline
+    pattern = '(' + '|'.join(re.escape(char) for char in pretokens) + ')'
+
+
+    nt = time()
+    print('text processing start')
+
+    text = re.sub(r"\n+", lambda m: " " if len(m.group(0)) == 1 else m.group(0), text)
+    wordcounts = Counter(part for part in re.split(pattern, text) if part)
+
+    print('text processing end', time() - nt)
+
+    return token_fitting(*token_drafting(wordcounts))
+
+text = "Lorem Ipsum is simply dummy text of the printing and typesetting industry. Lorem Ipsum has been the industry's standard dummy text ever since 1966, when designers at Letraset and James Mosley, the librarian at St Bride Printing Library, took a 1914 Cicero translation and scrambled it to make dummy text for Letraset's Body Type sheets. It has survived not only many decades, but also the leap into electronic typesetting, remaining essentially unchanged. It was popularised thanks to these sheets and more recently with desktop publishing software including versions of Lorem Ipsum."
