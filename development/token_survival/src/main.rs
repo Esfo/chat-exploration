@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::env;
 use std::error::Error;
 use std::fs::{create_dir_all, File};
@@ -86,7 +86,7 @@ fn make_token_order(word: &str) -> Vec<(String, i64)> {
     let cp_count = boundaries.len() - 1;
 
     let mut order: Vec<String> = Vec::new();
-    let mut idx: HashMap<String, usize> = HashMap::new();
+    let mut idx: HashMap<String, usize> = HashMap::default();
     let mut counts: Vec<i64> = Vec::new();
 
     for size in 1..=cp_count {
@@ -120,7 +120,7 @@ struct Interner {
 impl Interner {
     fn new() -> Self {
         Self {
-            ids: HashMap::new(),
+            ids: HashMap::default(),
             strs: Vec::new(),
             survivors: Vec::new(),
             misses: Vec::new(),
@@ -208,21 +208,34 @@ fn main() -> Result<(), Box<dyn Error>> {
         .map(|s| interner.intern(s))
         .collect();
 
-    let mut tokencache: HashMap<String, Vec<(u32, i64)>> = HashMap::new();
+    let mut tokencache: HashMap<String, Vec<(u32, i64)>> = HashMap::default();
     let mut modifications: Vec<i64> = vec![0; interner.strs.len()];
     let mut was_touched: Vec<bool> = vec![false; interner.strs.len()];
     let mut touched: Vec<u32> = Vec::new();
+    // explicit list of currently-alive token ids, so the per-paragraph cull is
+    // O(alive) instead of O(all interned tokens ever seen)
+    let mut alive_ids: Vec<u32> = Vec::new();
+    let mut in_list: Vec<bool> = vec![false; interner.strs.len()];
 
-    let ensure_capacity = |needed: usize, modifications: &mut Vec<i64>, was_touched: &mut Vec<bool>| {
+    let ensure_capacity = |needed: usize,
+                           modifications: &mut Vec<i64>,
+                           was_touched: &mut Vec<bool>,
+                           in_list: &mut Vec<bool>| {
         if modifications.len() < needed {
             modifications.resize(needed, 0);
             was_touched.resize(needed, false);
+            in_list.resize(needed, false);
         }
     };
 
     for text in &finaltext {
         let tb = text.as_bytes();
-        ensure_capacity(interner.strs.len(), &mut modifications, &mut was_touched);
+        ensure_capacity(
+            interner.strs.len(),
+            &mut modifications,
+            &mut was_touched,
+            &mut in_list,
+        );
 
         // spaces — always considered "modified" even when count is 0
         {
@@ -248,7 +261,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         // \n, \t, etc. never enter the cache and ' ' is only counted via the explicit
         // survivors[' '] += text.count(' ') above.
         let mut wc_order: Vec<&[u8]> = Vec::new();
-        let mut wc_counts: HashMap<&[u8], i64> = HashMap::new();
+        let mut wc_counts: HashMap<&[u8], i64> = HashMap::default();
         for part in parts {
             if part.is_empty() {
                 continue;
@@ -281,7 +294,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                     interned.push((id, c));
                 }
                 tokencache.insert(word_str.to_string(), interned);
-                ensure_capacity(interner.strs.len(), &mut modifications, &mut was_touched);
+                ensure_capacity(
+                    interner.strs.len(),
+                    &mut modifications,
+                    &mut was_touched,
+                    &mut in_list,
+                );
             }
 
             let entries = tokencache.get(word_str).unwrap();
@@ -301,31 +319,42 @@ fn main() -> Result<(), Box<dyn Error>> {
         // token's dict-insertion position moves to the end for tie-breaking)
         for &id in &touched {
             let idu = id as usize;
-            if !interner.alive[idu] {
+            if interner.alive[idu] {
+                interner.survivors[idu] += modifications[idu];
+            } else {
                 interner.alive[idu] = true;
                 interner.survivors[idu] = modifications[idu];
                 interner.misses[idu] = 0;
                 interner.bump_position(id);
-            } else {
-                interner.survivors[idu] += modifications[idu];
+            }
+            // ensure every alive token is tracked in alive_ids exactly once
+            if !in_list[idu] {
+                in_list[idu] = true;
+                alive_ids.push(id);
             }
         }
 
-        // cull every alive token
-        let n_ids = interner.strs.len();
-        for id in 0..n_ids {
-            if !interner.alive[id] {
-                continue;
-            }
-            if was_touched[id] {
-                interner.misses[id] = 0;
-            } else if interner.survivors[id] <= 0 {
-                interner.misses[id] += 1;
-                if interner.misses[id] >= survivalrounds {
-                    interner.alive[id] = false;
+        // cull only the currently-alive tokens; dead ones are swap-removed from the
+        // list so the next round never has to walk them
+        let mut i = 0;
+        while i < alive_ids.len() {
+            let id = alive_ids[i];
+            let idu = id as usize;
+            if was_touched[idu] {
+                interner.misses[idu] = 0;
+                i += 1;
+            } else if interner.survivors[idu] <= 0 {
+                interner.misses[idu] += 1;
+                if interner.misses[idu] >= survivalrounds {
+                    interner.alive[idu] = false;
+                    in_list[idu] = false;
+                    alive_ids.swap_remove(i);
+                } else {
+                    i += 1;
                 }
             } else {
-                interner.survivors[id] -= 1;
+                interner.survivors[idu] -= 1;
+                i += 1;
             }
         }
 
