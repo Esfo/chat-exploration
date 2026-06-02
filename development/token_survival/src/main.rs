@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::error::Error;
 use std::fs::{create_dir_all, File};
@@ -341,7 +341,71 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let middle_sort_seconds = nt.elapsed().as_secs_f64();
     println!("middle sort finished {}", middle_sort_seconds);
-    println!("total tokens: {}", n);
+
+    let coverage_nt = Instant::now();
+    println!("token coverage test start");
+
+    // tokencache keys are exactly the words encountered (Python's `allwords`).
+    let allwords: Vec<&String> = tokencache.keys().collect();
+    let token_set: HashSet<&str> = interner
+        .strs
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| interner.alive[*i])
+        .map(|(_, s)| s.as_str())
+        .collect();
+
+    println!("total tokens: {}", token_set.len());
+    println!("total words: {}", allwords.len());
+
+    let mut covered: usize = 0;
+    let mut boundaries: Vec<usize> = Vec::new();
+    let mut reached: Vec<bool> = Vec::new();
+    for word in &allwords {
+        let bytes = word.as_bytes();
+        boundaries.clear();
+        for (i, _) in word.char_indices() {
+            boundaries.push(i);
+        }
+        boundaries.push(bytes.len());
+        let cp = boundaries.len() - 1;
+        reached.clear();
+        reached.resize(cp + 1, false);
+        reached[0] = true;
+        for start in 0..cp {
+            if !reached[start] {
+                continue;
+            }
+            for end in (start + 1)..=cp {
+                // SAFETY: slice between char boundaries of valid utf-8
+                let sub = unsafe {
+                    std::str::from_utf8_unchecked(&bytes[boundaries[start]..boundaries[end]])
+                };
+                if token_set.contains(sub) {
+                    reached[end] = true;
+                }
+            }
+            if reached[cp] {
+                break;
+            }
+        }
+        if reached[cp] {
+            covered += 1;
+        }
+    }
+
+    let coverage_seconds = coverage_nt.elapsed().as_secs_f64();
+    let total_words = allwords.len();
+    let uncovered = total_words - covered;
+    let percent_covered = if total_words == 0 {
+        0.0
+    } else {
+        covered as f64 / total_words as f64
+    };
+    println!("covered words: {} / {}", covered, total_words);
+    println!("percent covered: {}", percent_covered);
+    println!("uncovered words: {}", uncovered);
+    println!("token coverage test end {}", coverage_seconds);
 
     let mut out = BufWriter::new(File::create(outputfolder.join("middle_tokens.jsonl"))?);
     for id in &middle {
