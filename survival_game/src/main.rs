@@ -33,15 +33,20 @@ const DEATHFLOOR: i64 = 0; // a leaf dies when its survival score drops to this
 
 #[derive(Deserialize)]
 struct Config {
+    // grace period: how many consecutive rounds a leaf may sit at score 0 (absent) before
+    // it dies (matches tokens-by-survival.py). a leaf gains +1 when present and -1 when
+    // absent; once its score reaches 0, it gets this many further absences before removal.
+    survivalrounds: i64,
     // only needed to rebuild `allwords` for the coverage sanity check; the game itself
     // runs on the raw paragraph text so spaces/punctuation are real, linkable characters.
     wordsplits: Vec<String>,
 }
 
 struct Tok {
-    score: i64, // +1/-1 survival score (only leaves change it); decides life/death
-    count: i64, // raw cumulative occurrences; only used for consolidation
-    born: u64,  // round index this token was (re)born on
+    score: i64,  // +1/-1 survival score (only leaves change it)
+    misses: i64, // consecutive absent rounds accrued while score is at the death floor
+    count: i64,  // raw cumulative occurrences; only used for consolidation
+    born: u64,   // round index this token was (re)born on
 }
 
 // drop the last character
@@ -122,6 +127,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     } else {
         serde_json::from_reader(File::open(configarg)?)?
     };
+    let survivalrounds = config.survivalrounds;
 
     // word-split table (only for the coverage test's allwords)
     let splits: Vec<Vec<u8>> = config.wordsplits.iter().map(|s| s.as_bytes().to_vec()).collect();
@@ -266,7 +272,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             // born as a fresh leaf; the survival game below gives it its first +1
             tokens.insert(
                 token.clone(),
-                Tok { score: DEATHFLOOR, count: occ, born: round },
+                Tok { score: DEATHFLOOR, misses: 0, count: occ, born: round },
             );
             leaves.insert(token.clone());
             for p in &livingparents {
@@ -282,13 +288,20 @@ fn main() -> Result<(), Box<dyn Error>> {
             if present.contains_key(&token) {
                 if let Some(t) = tokens.get_mut(&token) {
                     t.score += 1;
+                    t.misses = 0; // reappeared: reset the grace counter
                 }
                 continue;
             }
             let dead = {
                 let t = tokens.get_mut(&token).expect("leaf must be alive");
-                t.score -= 1;
-                t.score <= DEATHFLOOR
+                if t.score > DEATHFLOOR {
+                    t.score -= 1; // still above the floor: just decay
+                    false
+                } else {
+                    // sitting at the death floor: burn a grace round, die after survivalrounds
+                    t.misses += 1;
+                    t.misses >= survivalrounds
+                }
             };
             if !dead {
                 continue;

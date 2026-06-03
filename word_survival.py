@@ -9,7 +9,7 @@ from read_paragraphs import read_paragraphs
 survivalproject = Path(__file__).resolve().parent / 'survival_game'
 
 
-def word_survival(textsource, output, coveragetest=True):
+def word_survival(textsource, output, survivalrounds, coveragetest=True):
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
 
@@ -22,6 +22,7 @@ def word_survival(textsource, output, coveragetest=True):
     wordsplits = sorted(set(wordsplits), key=len, reverse=True)
 
     config = {
+        'survivalrounds': survivalrounds,
         'wordsplits': wordsplits,
     }
 

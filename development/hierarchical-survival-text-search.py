@@ -106,7 +106,8 @@ print('file reading end', time() - nt)
 #everything downstream - births, the leaf-only +1/-1 survival game, and the final
 #consolidation - is identical to hierarchical-survival.py.
 
-deathfloor = 0   #a leaf dies when its survival score drops to this
+deathfloor = 0       #the score floor; once a leaf is here, the grace period begins
+survivalrounds = 50  #consecutive absent rounds allowed at the floor before a leaf dies
 
 nt = time()
 print('hierarchical survival game begin')
@@ -121,6 +122,7 @@ allwords = set()
 singles = Counter()              #the permanent base layer: char -> count (never removed)
 count = Counter()                #living multi-char token -> raw cumulative occurrences
 score = {}                       #living multi-char token -> +1/-1 survival score
+misses = {}                      #leaf at the floor -> consecutive absent rounds accrued
 leaves = set()                   #the frontier: living tokens with no living children
 children = defaultdict(set)      #token -> set of living child tokens grown from it
 parents = {}                     #token -> set of the (len-1) end-substrings it grew from
@@ -203,14 +205,22 @@ for text in finaltext:
     for token in tuple(leaves):
         if token in present:
             score[token] += 1
-        else:
-            score[token] -= 1
-            if score[token] <= deathfloor:
+            misses.pop(token, None)   #reappeared: reset the grace counter
+            continue
+
+        if score[token] > deathfloor:
+            score[token] -= 1         #still above the floor: just decay
+            continue
+
+        #sitting at the death floor: burn a grace round, die after survivalrounds of them
+        misses[token] = misses.get(token, 0) + 1
+        if misses[token] >= survivalrounds:
                 #this branch tip is dead - remove it and detach from its parents,
                 #re-promoting any parent that has now lost its last child
                 leaves.discard(token)
                 del score[token]
                 del count[token]
+                misses.pop(token, None)
                 for p in parents.pop(token, ()):
                     childset = children.get(p)
                     if childset is not None:

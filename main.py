@@ -4,8 +4,10 @@ from training import Config, train
 
 #=== token survival config ===
 
-#the hierarchical survival game has no fixed "survival rounds" dial — a leaf simply dies
-#once its +1/-1 score drops to 0 — so there is nothing to configure here anymore.
+#how many consecutive rounds a leaf may sit at score 0 (absent) before it dies. a leaf
+#gains +1 when it appears and loses 1 when absent; once its score hits 0, this is the
+#grace period of further absences it gets before being removed.
+survivalrounds = 50
 
 textsource = '/home/sfo/store/gutenberg/gutenbooks/'
 
@@ -54,7 +56,7 @@ log_every = 100
 #=== pipeline ===
 
 if tokenoutput:
-    tokensfile = word_survival(textsource, tokenoutput, coveragetest)
+    tokensfile = word_survival(textsource, tokenoutput, survivalrounds, coveragetest)
     print('tokens written to', tokensfile)
 else:
     tokensfile = tokeninput
