@@ -1,174 +1,174 @@
-# rolling downhill: how a model learns, in slow motion.
-#
-# a model "learns" by changing its numbers a tiny bit at a time to make its
-# mistakes smaller. here we shrink that down to a single point trying to find
-# the bottom of a valley. you can watch it roll, and play with how big its
-# steps are.
+#one step of training, in slow motion: take the model's weights and the
+#gradient backprop produced, and nudge the weights to make the loss smaller.
 
 # %%
-# the valley we're rolling down
-# -----------------------------
-# picture a bowl. the bottom (0, 0) is the goal: that's where mistakes are
-# smallest. this bowl is lopsided on purpose: much steeper one way than the
-# other. that lopsidedness is what makes the simple method struggle and the
-# smarter method worth having.
+#===simulated input (what the training loop hands this step)===
 import numpy as np
 import matplotlib.pyplot as plt
 
-steepness = np.array([1.0, 12.0])   # [gentle direction, steep direction]
+#weights: the model's trainable numbers (p in training.py). a real model has
+#millions; we use two so we can actually watch them move.
+weights = np.array([4.5, 3.0])
 
-# how big a step to take each time. this is the main thing to play with:
-# too small and it crawls, too big and it overshoots and flies off.
-step_size = 0.05
+#sensitivity: how much the loss reacts to each weight. lopsided on purpose,
+#the loss cares 12x more about the second weight than the first. real losses
+#are uneven like this, and it's what makes the plain method struggle.
+sensitivity = np.array([1.0, 12.0])
 
-# "simple" steps straight downhill. "smarter" is the method from training.py
-# (called adam) that adjusts its step in each direction as it goes.
-method = "simple"
+#loss(weights): how wrong the model currently is. lower is better, 0 is perfect.
+#in training.py this is the cross-entropy; here it's a simple bowl so we can see it.
+def loss_of(w):
+    return 0.5 * np.sum(sensitivity * w**2)
 
-# where the watched roll starts, and the most steps we'll let it take
-start = np.array([4.5, 3.0])
-step_limit = 80
+#learning_rate (lr in training.py): how big each nudge is. the main knob.
+learning_rate = 0.05
 
-# how close to the bottom counts as "made it", and how far out counts as "flew off"
-made_it_distance = 0.01
-flew_off_distance = 1000.0
+#"plain" nudges straight downhill. "adam" is training.py's adamw_update.
+method = "plain"
+
+#how many steps we allow, and what counts as "done" / "blown up"
+max_steps = 80
+done_when_closer_than = 0.01
+blown_up_when_further_than = 1000.0
 
 
 # %%
-# roll down once, watching every step
-# -----------------------------------
-position = start.astype(float)
-trail = [position.copy()]
+#===the update, repeated step by step===
 
-# the smarter method keeps two memories as it goes (both start empty and stay
-# unused for the simple method):
-recent_direction = np.zeros(2)   # the general downhill direction lately
-recent_steepness = np.zeros(2)   # how steep each direction has been lately
+#m and v are adam's memory (m and v in training.py). they stay unused for "plain".
+m = np.zeros(2)  #running average of the gradient
+v = np.zeros(2)  #running average of the squared gradient
 
-print(f"method = {method},  step_size = {step_size}")
-for step in range(1, step_limit + 1):
-    # which way is uphill right now, and how steeply
-    uphill = steepness * position
+path = [weights.copy()]
+print(f"method={method}  learning_rate={learning_rate}  starting loss={loss_of(weights):.3f}")
 
-    if method == "simple":
-        # move straight downhill, scaled by the step size
-        position = position - step_size * uphill
+for step in range(1, max_steps + 1):
+    #gradient: which way increases the loss, and how steeply. backprop produces
+    #this in training.py; our loss is simple enough to differentiate directly.
+    gradient = sensitivity * weights
+
+    if method == "plain":
+        #step straight downhill
+        weights = weights - learning_rate * gradient
     else:
-        # fold this step's uphill into the running memories
-        recent_direction = 0.9 * recent_direction + 0.1 * uphill
-        recent_steepness = 0.999 * recent_steepness + 0.001 * uphill**2
-        # those memories start out too small, so nudge them back up early on
-        direction = recent_direction / (1 - 0.9**step)
-        size = recent_steepness / (1 - 0.999**step)
-        # step downhill, but shrink the step in directions that are steep and
-        # grow it in directions that are gentle. that evens out the lopsided bowl.
-        position = position - step_size * direction / (np.sqrt(size) + 1e-8)
+        #blend this gradient into the running averages
+        m = 0.9 * m + 0.1 * gradient
+        v = 0.999 * v + 0.001 * gradient**2
+        #the averages start near zero, so scale them up early on (bias correction)
+        m_corrected = m / (1 - 0.9**step)
+        v_corrected = v / (1 - 0.999**step)
+        #big steps where the loss is gentle, small steps where it's steep
+        weights = weights - learning_rate * m_corrected / (np.sqrt(v_corrected) + 1e-8)
 
-    trail.append(position.copy())
+    path.append(weights.copy())
 
-    # how high up the valley wall we still are (0 at the bottom)
-    height = 0.5 * np.sum(steepness * position**2)
+    #stop early if we've basically arrived, or if the step size made it explode
+    distance = np.sqrt(np.sum(weights**2))
     if step == 1 or step % 8 == 0:
-        print(f"  step {step:3d}: at {np.round(position, 3)}, height {height:.4f}")
-
-    distance_to_bottom = np.sqrt(np.sum(position**2))
-    if distance_to_bottom < made_it_distance:
-        print(f"  made it to the bottom in {step} steps")
+        print(f"  step {step:3d}: weights={np.round(weights, 3)}  loss={loss_of(weights):.4f}")
+    if distance < done_when_closer_than:
+        print(f"  reached the minimum in {step} steps")
         break
-    if distance_to_bottom > flew_off_distance:
-        print(f"  flew off after {step} steps (step_size is too big)")
+    if distance > blown_up_when_further_than:
+        print(f"  blew up after {step} steps (learning_rate too large)")
         break
 
-trail = np.array(trail)
+path = np.array(path)
 
 
 # %%
-# draw the path it took, and how its height fell
-# ----------------------------------------------
-spread = np.linspace(-5, 5, 200)
-across, along = np.meshgrid(spread, spread)
-valley_height = 0.5 * (steepness[0] * across**2 + steepness[1] * along**2)
+#===see what happened (plots stacked top to bottom)===
 
-figure, (left, right) = plt.subplots(1, 2, figsize=(13, 5))
+#a grid of the loss surface so we can draw the weights' path across it
+grid = np.linspace(-5, 5, 200)
+weight1, weight2 = np.meshgrid(grid, grid)
+loss_surface = 0.5 * (sensitivity[0] * weight1**2 + sensitivity[1] * weight2**2)
 
-left.contour(across, along, valley_height, levels=30, cmap="viridis", alpha=0.6)
-left.plot(trail[:, 0], trail[:, 1], "o-", color="crimson", ms=3, lw=1, label="path it took")
-left.plot(0, 0, "*", color="gold", ms=20, mec="black", label="the bottom (goal)")
-left.plot(*start, "s", color="black", ms=8, label="started here")
-left.set_title(f"{method} steps, step_size = {step_size}")
-left.legend()
-left.set_xlabel("gentle direction")
-left.set_ylabel("steep direction")
+figure, (top, bottom) = plt.subplots(2, 1, figsize=(7, 11))
 
-right.plot([0.5 * np.sum(steepness * spot**2) for spot in trail], "o-", color="crimson", ms=3)
-right.set_title("how far from the goal, step by step")
-right.set_xlabel("step")
-right.set_ylabel("height above the bottom")
-right.set_yscale("symlog")
+#top: the path the weights took toward the lowest-loss point
+top.contour(weight1, weight2, loss_surface, levels=30, cmap="viridis", alpha=0.6)
+top.plot(path[:, 0], path[:, 1], "o-", color="crimson", ms=3, lw=1, label="weights over time")
+top.plot(0, 0, "*", color="gold", ms=20, mec="black", label="lowest loss")
+top.plot(path[0, 0], path[0, 1], "s", color="black", ms=8, label="started here")
+top.set_title(f"how the two weights moved ({method}, learning_rate={learning_rate})")
+top.set_xlabel("weight 1")
+top.set_ylabel("weight 2")
+top.legend()
+
+#bottom: the loss itself falling as the steps go on
+bottom.plot([loss_of(w) for w in path], "o-", color="crimson", ms=3)
+bottom.set_title("loss going down, step by step")
+bottom.set_xlabel("step")
+bottom.set_ylabel("loss")
+bottom.set_yscale("symlog")
 
 plt.tight_layout()
 plt.show()
 
 
 # %%
-# now do it from 500 random starting spots
-# ----------------------------------------
-# one roll is just one story. drop the point from hundreds of random places and
-# a real pattern shows up: how many steps it usually needs to reach the bottom,
-# and how often this step_size just makes it fly off instead. that pattern is
-# the actual lesson, the same way rolling dice many times shows you the odds.
+#===output (what gets handed back to the training loop)===
+#these updated weights get written back into the model and used in the next
+#forward pass. that hand-back is the entire job of this step.
+print("trained weights:", np.round(path[-1], 4))
+print("final loss     :", round(float(loss_of(path[-1])), 4))
+
+
+# %%
+#===zoom out: run it from 500 random starts===
+#one run is one story. real training starts from random weights (init_params with
+#different seeds), so try many and watch the pattern: how many steps it usually
+#needs, and how often this learning_rate just blows up instead.
 random_starts = np.random.default_rng(1).uniform(-4.5, 4.5, size=(500, 2))
 
-steps_until_made_it = []
-flew_off_count = 0
-too_slow_count = 0
+steps_needed = []
+blew_up = 0
+too_slow = 0
 
-for spot in random_starts:
-    position = spot.copy()
-    recent_direction = np.zeros(2)
-    recent_steepness = np.zeros(2)
-    result = "too slow"
+for start in random_starts:
+    weights = start.copy()
+    m = np.zeros(2)
+    v = np.zeros(2)
+    outcome = "too slow"
 
-    for step in range(1, step_limit + 1):
-        uphill = steepness * position
-        if method == "simple":
-            position = position - step_size * uphill
+    for step in range(1, max_steps + 1):
+        gradient = sensitivity * weights
+        if method == "plain":
+            weights = weights - learning_rate * gradient
         else:
-            recent_direction = 0.9 * recent_direction + 0.1 * uphill
-            recent_steepness = 0.999 * recent_steepness + 0.001 * uphill**2
-            direction = recent_direction / (1 - 0.9**step)
-            size = recent_steepness / (1 - 0.999**step)
-            position = position - step_size * direction / (np.sqrt(size) + 1e-8)
+            m = 0.9 * m + 0.1 * gradient
+            v = 0.999 * v + 0.001 * gradient**2
+            weights = weights - learning_rate * (m / (1 - 0.9**step)) / (np.sqrt(v / (1 - 0.999**step)) + 1e-8)
 
-        distance_to_bottom = np.sqrt(np.sum(position**2))
-        if distance_to_bottom > flew_off_distance:
-            result = "flew off"
+        distance = np.sqrt(np.sum(weights**2))
+        if distance > blown_up_when_further_than:
+            outcome = "blew up"
             break
-        if distance_to_bottom < made_it_distance:
-            result = "made it"
-            steps_until_made_it.append(step)
+        if distance < done_when_closer_than:
+            outcome = "done"
+            steps_needed.append(step)
             break
 
-    if result == "flew off":
-        flew_off_count += 1
-    elif result == "too slow":
-        too_slow_count += 1
+    if outcome == "blew up":
+        blew_up += 1
+    elif outcome == "too slow":
+        too_slow += 1
 
-print(f"\nout of 500 rolls (method = {method}, step_size = {step_size}):")
-print(f"  reached the bottom : {len(steps_until_made_it)}")
-print(f"  flew off           : {flew_off_count}")
-print(f"  too slow to finish : {too_slow_count}  (needed more than {step_limit} steps)")
+print(f"out of 500 runs (method={method}, learning_rate={learning_rate}):")
+print(f"  reached the minimum: {len(steps_needed)}")
+print(f"  blew up            : {blew_up}")
+print(f"  too slow to finish : {too_slow}  (needed more than {max_steps} steps)")
 
-figure, axis = plt.subplots(figsize=(8, 4.5))
-if steps_until_made_it:
-    axis.hist(steps_until_made_it, bins=range(0, step_limit + 2), color="steelblue", edgecolor="black")
-axis.set_title(f"how many steps it took to reach the bottom\n"
-               f"({flew_off_count} flew off, {too_slow_count} were too slow)")
-axis.set_xlabel("steps needed")
-axis.set_ylabel("number of rolls")
+figure, axis = plt.subplots(figsize=(7, 4.5))
+if steps_needed:
+    axis.hist(steps_needed, bins=range(0, max_steps + 2), color="steelblue", edgecolor="black")
+axis.set_title(f"steps needed to reach the minimum\n({blew_up} blew up, {too_slow} too slow)")
+axis.set_xlabel("steps")
+axis.set_ylabel("number of runs")
 plt.tight_layout()
 plt.show()
 
-# try this: bump step_size up to 0.18 with method = "simple" and almost every
-# roll flies off. switch to method = "smarter" and it can take much bigger
-# steps without flying off. that difference is why real training uses adam.
+#try it: set learning_rate=0.18 with method="plain" and almost every run blows up.
+#switch to method="adam" and it survives much bigger steps. that's why training
+#uses adam.
