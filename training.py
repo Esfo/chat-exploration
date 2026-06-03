@@ -82,14 +82,6 @@ class VocabTokenizer:
     converts token text into token IDs.
     """
 
-    #not actively used here because chunks are always exactly context_length tokens
-    #reserved so token ID 0 never means a real token
-    #would be used to fill shorter examples if you later train variable-length chunks
-    pad_id: int = 0
-
-    #stop codon
-    eos_id: int = 1
-
     #maps each token string to one token ID
     token_to_id: dict
 
@@ -101,6 +93,14 @@ class VocabTokenizer:
 
     #number of possible token IDs
     vocab_size: int
+
+    #not actively used here because chunks are always exactly context_length tokens
+    #reserved so token ID 0 never means a real token
+    #would be used to fill shorter examples if you later train variable-length chunks
+    pad_id: int = 0
+
+    #stop codon
+    eos_id: int = 1
 
     def encode(self, text):
         """
