@@ -188,7 +188,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         .map(|s| s.as_bytes().to_vec())
         .collect();
 
-    let reader = BufReader::new(File::open(finaltextpath)?);
+    // "-" means read the finaltext from stdin so the (huge) input never has to
+    // be written to disk.
+    let reader: Box<dyn BufRead> = if finaltextpath.as_os_str() == "-" {
+        Box::new(BufReader::new(std::io::stdin()))
+    } else {
+        Box::new(BufReader::new(File::open(finaltextpath)?))
+    };
     let mut finaltext: Vec<String> = Vec::new();
     for line in reader.lines() {
         let line = line?;

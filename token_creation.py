@@ -3,8 +3,6 @@ from pathlib import Path
 import json
 import string
 import subprocess
-import tempfile
-import os
 
 RUST_PROJECT = Path(__file__).resolve().parent / 'token_survival'
 
@@ -36,27 +34,23 @@ def create_tokens(paragraphs, output_file, survival_rounds=50, token_word_covera
     nt = time()
     print('token survival start')
 
-    # The finaltext input is huge and is only consumed by the rust binary as a
-    # scratch input. Write it to a temp file and delete it afterwards so it is
-    # never persisted in the repo data folder.
-    fd, finaltext_tmp = tempfile.mkstemp(suffix='.jsonl', prefix='finaltext_')
-    finaltextpath = Path(finaltext_tmp)
-    try:
-        with os.fdopen(fd, 'w', encoding='utf-8') as f:
-            for paragraph in paragraphs:
-                f.write(json.dumps(paragraph, ensure_ascii=False) + '\n')
+    with open(configpath, 'w', encoding='utf-8') as f:
+        json.dump(config, f, ensure_ascii=False)
 
-        with open(configpath, 'w', encoding='utf-8') as f:
-            json.dump(config, f, ensure_ascii=False)
-
-        subprocess.run(
-            ['cargo', 'run', '--release', '--',
-             str(finaltextpath), str(configpath), str(output_file),
-             '1' if token_word_coverage_test else '0'],
-            cwd=RUST_PROJECT, check=True,
-        )
-    finally:
-        finaltextpath.unlink(missing_ok=True)
+    # The finaltext input is huge and is only scratch input for the rust binary.
+    # Stream it in over stdin ("-") so it is never written to disk at all; the
+    # only output is the designated word list at output_file.
+    proc = subprocess.Popen(
+        ['cargo', 'run', '--release', '--',
+         '-', str(configpath), str(output_file),
+         '1' if token_word_coverage_test else '0'],
+        cwd=RUST_PROJECT, stdin=subprocess.PIPE, text=True, encoding='utf-8',
+    )
+    for paragraph in paragraphs:
+        proc.stdin.write(json.dumps(paragraph, ensure_ascii=False) + '\n')
+    proc.stdin.close()
+    if proc.wait() != 0:
+        raise subprocess.CalledProcessError(proc.returncode, proc.args)
 
     print('token survival end', time() - nt)
 
