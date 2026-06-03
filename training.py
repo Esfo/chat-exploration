@@ -787,7 +787,7 @@ def generate(prompt, tokenizer, p, cfg, max_new_tokens=100):
     return tokenizer.decode(ids)
 
 
-def train():
+def train(cfg=None):
     """
     main training loop
         load config
@@ -799,9 +799,15 @@ def train():
         backward pass
         update weights
         repeat
+
+    cfg: a Config with paths/hyperparameters set by the caller (main.py).
+         falls back to the built-in defaults when run standalone.
     """
 
-    cfg = Config()
+    #main.py is the configuration gateway and passes a fully-populated Config
+    #the default keeps training.py runnable on its own
+    if cfg is None:
+        cfg = Config()
 
     tokenizer = build_tokenizer_from_jsonl(cfg.tokenpath)
 
