@@ -1,129 +1,89 @@
-from collections import Counter, defaultdict
 from time import time
-import itertools
-import string
 import os
-import re
-import json
-import subprocess
+import sys
+import argparse
 from pathlib import Path
 
-#i had prior to this filtered out entire files that don't conform to english text or the characters im using
+# create_tokens lives at the repo root and owns the rust handoff.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from token_creation import create_tokens
 
-folder = '/home/sfo/store/gutenberg/gutenbooks/'
-outputfolder = '/home/sfo/data/models/tokens/'
+# i had prior to this filtered out entire files that don't conform to english
+# text or the characters im using
 
-files = os.listdir(folder)
+DEFAULT_CORPUS = '/home/sfo/store/gutenberg/gutenbooks/'
+ENCODINGS = ["utf-8-sig", "cp1252", "iso-8859-1"]
+ENDPUNCTUATION = ['.', '!', '?']
 
-encodings = ["utf-8-sig", "cp1252", "iso-8859-1"]
 
-digits = list(string.digits)
-spaces = list(string.whitespace) #replace these prior i guess
-punctuation = list(string.punctuation) + ['—']
-endpunctuation = ['.', '!', '?']
-newline = ['\n']
-
-pretokens = digits + spaces + punctuation + newline
-pattern = '(' + '|'.join(re.escape(char) for char in pretokens) + ')'
-
-survivalrounds = 50
-
-nt = time()
-print('file reading start')
-
-finaltext = []
-for file in files:
-    path = folder + file
-
-    for encoding in encodings:
+def read_text(path):
+    for encoding in ENCODINGS:
         try:
             with open(path, "r", encoding=encoding) as f:
-                text = f.read()
-            break
+                return f.read()
         except UnicodeDecodeError:
             continue
-    else:
-        raise UnicodeError(f"Could not decode file: {file}")
-    
-    text = text.split('\n')
-    
+    raise UnicodeError(f"Could not decode file: {path}")
+
+
+def split_paragraphs(text):
     paragraphs = []
     paragraph = ''
-    pswitch = False
-    for textblock in text:
+    for textblock in text.split('\n'):
         if textblock:
-            if pswitch:
-                paragraph += textblock + ' '
-                continue
-            else:
-                paragraph += textblock + ' '
-                pswitch = True
-        else:
-            #new paragraph
-            if paragraph:
-                paragraphs.append(paragraph)
+            paragraph += textblock + ' '
+        elif paragraph:
+            paragraphs.append(paragraph)
             paragraph = ''
-            pswitch = False
-        
+    return paragraphs
+
+
+def is_book_paragraph(paragraph):
     blockers = ['gutenberg', 'http', 'www', '.org', ' ebook']
-    for paragraph in paragraphs:
-        if any(i in paragraph.lower() for i in blockers):
-            #can't be an obvious ebook signature
-            continue
-        else:
-            punctuationcount = sum(paragraph.count(i) for i in endpunctuation)
-            if punctuationcount == 0:
-                #if the paragraph has no punctuation it's probably some ebook signature
-                continue
-            capitals = sum(1 for i in paragraph if i.isupper())
-            lowers = sum(1 for i in paragraph if i.islower())
-            if capitals + lowers > 0:
-                #ratio of capitals to lowercase and capitals to punctuation should probably make sense, otherwise it's likely not book text
-                caseratio = abs(capitals-lowers)/(capitals+lowers)
-                sentenceratio = abs(punctuationcount-capitals)/(punctuationcount+capitals)
-                if 0.7 > sentenceratio > 0.3 and caseratio > 0.7:
-                    finaltext.append(paragraph)
+    if any(i in paragraph.lower() for i in blockers):
+        # can't be an obvious ebook signature
+        return False
+    punctuationcount = sum(paragraph.count(i) for i in ENDPUNCTUATION)
+    if punctuationcount == 0:
+        # no punctuation -> probably some ebook signature
+        return False
+    capitals = sum(1 for i in paragraph if i.isupper())
+    lowers = sum(1 for i in paragraph if i.islower())
+    if capitals + lowers == 0:
+        return False
+    # ratio of capitals to lowercase and capitals to punctuation should make
+    # sense, otherwise it's likely not book text
+    caseratio = abs(capitals - lowers) / (capitals + lowers)
+    sentenceratio = abs(punctuationcount - capitals) / (punctuationcount + capitals)
+    return 0.7 > sentenceratio > 0.3 and caseratio > 0.7
 
-print('file reading end', time() - nt)
 
-nt = time()
-print('rust handoff start')
+def load_corpus(folder):
+    """Read every file in folder and return the filtered book paragraphs."""
+    finaltext = []
+    for file in os.listdir(folder):
+        text = read_text(os.path.join(folder, file))
+        finaltext.extend(p for p in split_paragraphs(text) if is_book_paragraph(p))
+    return finaltext
 
-project = Path(__file__).resolve().parent
-outputfile = Path('/home/sfo/data/models/tokens/middle_tokens.jsonl')
 
-outputfile.parent.mkdir(parents=True, exist_ok=True)
+def main():
+    parser = argparse.ArgumentParser(
+        description='Build the survival-token word list from a text corpus.')
+    parser.add_argument('output', type=Path,
+                        help='destination jsonl word list')
+    parser.add_argument('--corpus', type=Path, default=Path(DEFAULT_CORPUS),
+                        help='folder of source text files')
+    parser.add_argument('--survival-rounds', type=int, default=50)
+    args = parser.parse_args()
 
-wordsplits = spaces + ['--'] + punctuation
-wordsplits = sorted(set(wordsplits), key=len, reverse=True)
+    nt = time()
+    print('file reading start')
+    finaltext = load_corpus(args.corpus)
+    print('file reading end', time() - nt)
 
-config = {
-    'survivalrounds': survivalrounds,
-    'wordsplits': wordsplits,
-    'endpunctuation': endpunctuation,
-}
+    create_tokens(finaltext, args.output, survival_rounds=args.survival_rounds)
 
-# Nothing is written to disk except the final output: the config is passed
-# inline as a JSON arg and the (huge) finaltext is streamed in over stdin ("-").
-proc = subprocess.Popen(
-    [
-        'cargo',
-        'run',
-        '--release',
-        '--',
-        '-',
-        json.dumps(config, ensure_ascii=False),
-        str(outputfile),
-    ],
-    cwd=project,
-    stdin=subprocess.PIPE,
-    text=True,
-    encoding='utf-8',
-)
-for paragraph in finaltext:
-    proc.stdin.write(json.dumps(paragraph, ensure_ascii=False) + '\n')
-proc.stdin.close()
-if proc.wait() != 0:
-    raise subprocess.CalledProcessError(proc.returncode, proc.args)
 
-print('rust handoff end', time() - nt)
+if __name__ == '__main__':
+    main()
