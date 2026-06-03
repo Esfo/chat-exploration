@@ -90,10 +90,8 @@ nt = time()
 print('rust handoff start')
 
 project = Path(__file__).resolve().parent
-datafolder = project / 'data'
 outputfile = Path('/home/sfo/data/models/tokens/middle_tokens.jsonl')
 
-datafolder.mkdir(exist_ok=True)
 outputfile.parent.mkdir(parents=True, exist_ok=True)
 
 wordsplits = spaces + ['--'] + punctuation
@@ -105,28 +103,27 @@ config = {
     'endpunctuation': endpunctuation,
 }
 
-finaltextpath = datafolder / 'finaltext.jsonl'
-configpath = datafolder / 'config.json'
-
-with open(finaltextpath, 'w', encoding='utf-8') as f:
-    for paragraph in finaltext:
-        f.write(json.dumps(paragraph, ensure_ascii=False) + '\n')
-
-with open(configpath, 'w', encoding='utf-8') as f:
-    json.dump(config, f, ensure_ascii=False)
-
-subprocess.run(
+# Nothing is written to disk except the final output: the config is passed
+# inline as a JSON arg and the (huge) finaltext is streamed in over stdin ("-").
+proc = subprocess.Popen(
     [
         'cargo',
         'run',
         '--release',
         '--',
-        str(finaltextpath),
-        str(configpath),
+        '-',
+        json.dumps(config, ensure_ascii=False),
         str(outputfile),
     ],
     cwd=project,
-    check=True,
+    stdin=subprocess.PIPE,
+    text=True,
+    encoding='utf-8',
 )
+for paragraph in finaltext:
+    proc.stdin.write(json.dumps(paragraph, ensure_ascii=False) + '\n')
+proc.stdin.close()
+if proc.wait() != 0:
+    raise subprocess.CalledProcessError(proc.returncode, proc.args)
 
 print('rust handoff end', time() - nt)
