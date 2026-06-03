@@ -46,6 +46,9 @@ learning_rate = 1e-3
 #number of training steps to run
 train_steps = 2000
 
+#how often (in steps) to print the training loss to stdout
+log_every = 100
+
 
 #=== pipeline ===
 
@@ -69,6 +72,7 @@ if training:
         batch_size=batch_size,
         learning_rate=learning_rate,
         train_steps=train_steps,
+        log_every=log_every,
     )
     train(cfg)
 else:

@@ -44,8 +44,11 @@ class Config:
     #how large each training update is
     learning_rate: float
 
-    #get batch, predict next tokens, calculate loss, calculate gradients, update weights, repeat __this-many__ times
+    #number of training steps to run
     train_steps: int
+
+    #how often (in steps) to print the training loss to stdout
+    log_every: int
 
     #number of possible token IDs
         #this gets set after the tokenizer builds the vocabulary from tokenpath
@@ -866,8 +869,11 @@ def train(cfg):
             step=step,
         )
 
-        if step % 100 == 0:
-            print(f"step={step} loss={loss:.4f}")
+        #print the starting loss (step 1) so the baseline the descent works
+        #down from is visible, then print every log_every steps after that
+        #flush=True so the loss appears live even when stdout is piped/redirected
+        if step == 1 or step % cfg.log_every == 0:
+            print(f"step={step} loss={loss:.4f}", flush=True)
 
     print(generate("", tokenizer, p, cfg))
 
