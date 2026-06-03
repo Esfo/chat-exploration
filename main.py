@@ -2,8 +2,11 @@ from word_survival import word_survival
 from training import Config, train
 
 
-#=== word survival config ===
+#=== token survival config ===
 
+#how many consecutive rounds a leaf may sit at score 0 (absent) before it dies. a leaf
+#gains +1 when it appears and loses 1 when absent; once its score hits 0, this is the
+#grace period of further absences it gets before being removed.
 survivalrounds = 50
 
 textsource = '/home/sfo/store/gutenberg/gutenbooks/'
@@ -47,7 +50,7 @@ learning_rate = 1e-3
 train_steps = 2000
 
 #how often (in steps) to print the training loss to stdout
-log_every = 100
+log_every = 1
 
 
 #=== pipeline ===

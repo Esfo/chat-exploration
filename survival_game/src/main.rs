@@ -1,5 +1,27 @@
+// Hierarchical token survival — Rust port of development/hierarchical-survival-text-search.py
+//
+// Everything is built off individual characters. Every unique character is a permanent
+// "base layer" token that can never be removed (spaces included). Multi-character tokens
+// are grown on top as a tree: a length-2 token grows off the base layer, and a length-(k+1)
+// token is grown by adding one character to either end of a surviving length-k token.
+//
+// Each round (= one paragraph) only the FRONTIER leaves play the survival game: a leaf that
+// appears gains +1, a leaf that is absent loses 1 and dies at score 0. An internal node
+// (a parent that still has a living child) is frozen — neither +1 nor -1 — until all of its
+// children die, at which point it becomes a leaf again. A token can only be born off a parent
+// that was already alive coming INTO the round, so branches climb exactly one level per round.
+//
+// Per round the occurrence counting is done by descending the living tree against the raw
+// text (not by enumerating every substring): scan bigrams once, then expand only the branches
+// whose parent actually appears, reading each token's children straight off the parent's
+// occurrence positions. Dead subtrees are never scanned.
+//
+// At the very end, one consolidation pass: if a parent's cumulative occurrence count equals a
+// child's, the parent only ever occurs inside that child, so the parent is dropped and the
+// longer token kept. The base layer is never dropped.
+
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Deserialize;
-use std::collections::{HashMap, HashSet};
 use std::env;
 use std::error::Error;
 use std::fs::{create_dir_all, File};
@@ -7,37 +29,46 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::PathBuf;
 use std::time::Instant;
 
+const DEATHFLOOR: i64 = 0; // a leaf dies when its survival score drops to this
+
 #[derive(Deserialize)]
 struct Config {
+    // grace period: how many consecutive rounds a leaf may sit at score 0 (absent) before
+    // it dies (matches tokens-by-survival.py). a leaf gains +1 when present and -1 when
+    // absent; once its score reaches 0, it gets this many further absences before removal.
     survivalrounds: i64,
+    // only needed to rebuild `allwords` for the coverage sanity check; the game itself
+    // runs on the raw paragraph text so spaces/punctuation are real, linkable characters.
     wordsplits: Vec<String>,
-    endpunctuation: Vec<String>,
 }
 
-fn count_nonoverlapping(text: &[u8], needle: &[u8]) -> i64 {
-    let nl = needle.len();
-    if nl == 0 || nl > text.len() {
-        return 0;
-    }
-    if nl == 1 {
-        let b = needle[0];
-        return text.iter().filter(|&&x| x == b).count() as i64;
-    }
-    let mut count = 0i64;
-    let mut i = 0usize;
-    let n = text.len();
-    let first = needle[0];
-    while i + nl <= n {
-        if text[i] == first && &text[i..i + nl] == needle {
-            count += 1;
-            i += nl;
-        } else {
-            i += 1;
-        }
-    }
-    count
+struct Tok {
+    score: i64,  // +1/-1 survival score (only leaves change it)
+    misses: i64, // consecutive absent rounds accrued while score is at the death floor
+    count: i64,  // raw cumulative occurrences; only used for consolidation
+    born: u64,   // round index this token was (re)born on
 }
 
+// drop the last character
+fn drop_last(s: &str) -> &str {
+    match s.char_indices().next_back() {
+        Some((i, _)) => &s[..i],
+        None => s,
+    }
+}
+
+// drop the first character
+fn drop_first(s: &str) -> &str {
+    let mut it = s.char_indices();
+    it.next();
+    match it.next() {
+        Some((i, _)) => &s[i..],
+        None => "",
+    }
+}
+
+// byte-level split keeping both words and separators (mirrors Python re.split with a capture
+// group, where every non-empty piece — words and the separators between them — is kept).
 fn split_with_seps<'a>(
     text: &'a [u8],
     first_byte: &[Vec<u16>; 256],
@@ -75,102 +106,22 @@ fn split_with_seps<'a>(
     parts
 }
 
-// Returns (token, count) pairs in Python's nested-loop first-encounter order.
-fn make_token_order(word: &str) -> Vec<(String, i64)> {
-    let bytes = word.as_bytes();
-    let mut boundaries: Vec<usize> = Vec::with_capacity(word.len() + 1);
-    for (i, _) in word.char_indices() {
-        boundaries.push(i);
-    }
-    boundaries.push(bytes.len());
-    let cp_count = boundaries.len() - 1;
-
-    let mut order: Vec<String> = Vec::new();
-    let mut idx: HashMap<String, usize> = HashMap::new();
-    let mut counts: Vec<i64> = Vec::new();
-
-    for size in 1..=cp_count {
-        for start in 0..=cp_count - size {
-            let token_bytes = &bytes[boundaries[start]..boundaries[start + size]];
-            // SAFETY: slice lies between char boundaries of valid utf-8
-            let token = unsafe { std::str::from_utf8_unchecked(token_bytes) };
-            if let Some(&i) = idx.get(token) {
-                counts[i] += 1;
-            } else {
-                let s = token.to_string();
-                idx.insert(s.clone(), order.len());
-                order.push(s);
-                counts.push(1);
-            }
-        }
-    }
-    order.into_iter().zip(counts).collect()
-}
-
-struct Interner {
-    ids: HashMap<String, u32>,
-    strs: Vec<String>,
-    survivors: Vec<i64>,
-    misses: Vec<i64>,
-    alive: Vec<bool>,
-    positions: Vec<u32>,
-    next_position: u32,
-}
-
-impl Interner {
-    fn new() -> Self {
-        Self {
-            ids: HashMap::new(),
-            strs: Vec::new(),
-            survivors: Vec::new(),
-            misses: Vec::new(),
-            alive: Vec::new(),
-            positions: Vec::new(),
-            next_position: 0,
-        }
-    }
-
-    fn intern(&mut self, s: &str) -> u32 {
-        if let Some(&id) = self.ids.get(s) {
-            return id;
-        }
-        let id = self.strs.len() as u32;
-        let owned = s.to_string();
-        self.ids.insert(owned.clone(), id);
-        self.strs.push(owned);
-        self.survivors.push(0);
-        self.misses.push(0);
-        self.alive.push(true);
-        self.positions.push(self.next_position);
-        self.next_position += 1;
-        id
-    }
-
-    fn bump_position(&mut self, id: u32) {
-        self.positions[id as usize] = self.next_position;
-        self.next_position += 1;
-    }
-}
-
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = env::args().collect();
     if args.len() < 4 || args.len() > 5 {
-        eprintln!("usage: token_survival <finaltext.jsonl> <config.json> <outputfile> [coverage:0|1]");
+        eprintln!("usage: token_survival <finaltext.jsonl|-> <config.json|inline> <outputfile> [coverage:0|1]");
         std::process::exit(1);
     }
 
     let finaltextpath = PathBuf::from(&args[1]);
     let configarg = &args[2];
     let outputfile = PathBuf::from(&args[3]);
-    //optional 4th arg toggles the word-completion (coverage) test; defaults on
     let run_coverage = args.get(4).map(|s| s != "0").unwrap_or(true);
     if let Some(parent) = outputfile.parent() {
         create_dir_all(parent)?;
     }
 
-    // The config is tiny; accept it as an inline JSON string so nothing needs
-    // to be written to disk. (A leading '{' marks inline JSON; otherwise it is
-    // treated as a path for backward compatibility.)
+    // tiny config: a leading '{' marks inline JSON, otherwise treat it as a path
     let config: Config = if configarg.trim_start().starts_with('{') {
         serde_json::from_str(configarg)?
     } else {
@@ -178,25 +129,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
     let survivalrounds = config.survivalrounds;
 
-    let splits: Vec<Vec<u8>> = config
-        .wordsplits
-        .iter()
-        .map(|s| s.as_bytes().to_vec())
-        .collect();
+    // word-split table (only for the coverage test's allwords)
+    let splits: Vec<Vec<u8>> = config.wordsplits.iter().map(|s| s.as_bytes().to_vec()).collect();
     let mut first_byte: [Vec<u16>; 256] = std::array::from_fn(|_| Vec::new());
     for (i, sp) in splits.iter().enumerate() {
         if !sp.is_empty() {
             first_byte[sp[0] as usize].push(i as u16);
         }
     }
-    let endpunc: Vec<Vec<u8>> = config
-        .endpunctuation
-        .iter()
-        .map(|s| s.as_bytes().to_vec())
-        .collect();
 
-    // "-" means read the finaltext from stdin so the (huge) input never has to
-    // be written to disk.
+    // "-" reads the (huge) finaltext from stdin so it never has to hit disk
     let reader: Box<dyn BufRead> = if finaltextpath.as_os_str() == "-" {
         Box::new(BufReader::new(std::io::stdin()))
     } else {
@@ -213,256 +155,280 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let nt = Instant::now();
-    println!("token survival game begin");
+    println!("hierarchical survival game begin");
 
-    let mut interner = Interner::new();
-    // Python increments survivors[' '] and survivors[p] every paragraph regardless of count
-    // (Counter += 0 still inserts the key), so these IDs must come first.
-    let space_id = interner.intern(" ");
-    let endpunc_ids: Vec<u32> = config
-        .endpunctuation
-        .iter()
-        .map(|s| interner.intern(s))
-        .collect();
+    // --- persistent state across rounds ---
+    let mut singles: FxHashMap<char, i64> = FxHashMap::default(); // permanent base layer
+    let mut tokens: FxHashMap<String, Tok> = FxHashMap::default(); // living multi-char tokens
+    let mut leaves: FxHashSet<String> = FxHashSet::default(); // the frontier
+    let mut children: FxHashMap<String, FxHashSet<String>> = FxHashMap::default();
+    let mut parents: FxHashMap<String, Vec<String>> = FxHashMap::default();
+    let mut allwords: FxHashSet<String> = FxHashSet::default(); // coverage only
 
-    let mut tokencache: HashMap<String, Vec<(u32, i64)>> = HashMap::new();
-    let mut modifications: Vec<i64> = vec![0; interner.strs.len()];
-    let mut was_touched: Vec<bool> = vec![false; interner.strs.len()];
-    let mut touched: Vec<u32> = Vec::new();
+    // scratch reused each round: byte offset of each codepoint boundary in the paragraph,
+    // so a token spanning codepoints [i, j) is just &text[boff[i]..boff[j]] (no allocation)
+    let mut boff: Vec<usize> = Vec::new();
 
-    let ensure_capacity = |needed: usize, modifications: &mut Vec<i64>, was_touched: &mut Vec<bool>| {
-        if modifications.len() < needed {
-            modifications.resize(needed, 0);
-            was_touched.resize(needed, false);
-        }
-    };
+    for (round, text) in finaltext.iter().enumerate() {
+        let round = round as u64;
 
-    for text in &finaltext {
-        let tb = text.as_bytes();
-        ensure_capacity(interner.strs.len(), &mut modifications, &mut was_touched);
-
-        // spaces — always considered "modified" even when count is 0
-        {
-            let id = space_id as usize;
-            if !was_touched[id] {
-                was_touched[id] = true;
-                touched.push(space_id);
+        // words are only needed for the coverage sanity check, not for the game
+        if run_coverage {
+            for part in split_with_seps(text.as_bytes(), &first_byte, &splits) {
+                if part.is_empty() {
+                    continue;
+                }
+                // SAFETY: parts are byte ranges of valid utf-8 split at codepoint boundaries
+                let s = unsafe { std::str::from_utf8_unchecked(part) };
+                if !allwords.contains(s) {
+                    allwords.insert(s.to_string());
+                }
             }
-            modifications[id] += count_nonoverlapping(tb, b" ");
         }
-        for (i, p) in endpunc.iter().enumerate() {
-            let id = endpunc_ids[i] as usize;
-            if !was_touched[id] {
-                was_touched[id] = true;
-                touched.push(endpunc_ids[i]);
+
+        // base layer — count every single character (spaces included)
+        for c in text.chars() {
+            *singles.entry(c).or_insert(0) += 1;
+        }
+
+        // index the paragraph by codepoint boundary so a token spanning codepoints [i, j) is
+        // &text[boff[i]..boff[j]] — slicing matches Python's str slicing with zero allocation
+        boff.clear();
+        for (b, _) in text.char_indices() {
+            boff.push(b);
+        }
+        boff.push(text.len());
+        let n = boff.len() - 1; // number of codepoints
+
+        // A token is "alive coming into this round" iff it exists and was born on an earlier
+        // round (born < round). Births happen below, after the descent, so during the descent
+        // every entry in `tokens` already satisfies this; in the births loop the born<round
+        // check is what stops a parent (re)born this round from spawning a child this round.
+
+        // --- descend the living tree against the text ---
+        // `current`/`nxt`/`present` are keyed by &str slices borrowed straight from `text`, so
+        // no String is allocated per occurrence; we only allocate when a token is actually born.
+        let mut present: FxHashMap<&str, i64> = FxHashMap::default();
+        let mut current: FxHashMap<&str, FxHashSet<usize>> = FxHashMap::default();
+        for i in 0..n.saturating_sub(1) {
+            current.entry(&text[boff[i]..boff[i + 2]]).or_default().insert(i);
+        }
+
+        let mut level = 2usize;
+        while !current.is_empty() {
+            let mut nxt: FxHashMap<&str, FxHashSet<usize>> = FxHashMap::default();
+            for (&token, positions) in current.iter() {
+                present.insert(token, positions.len() as i64);
+
+                // only living branches grow; a token that wasn't alive coming in is left as a
+                // tip this round (its own birth/scoring still happens below)
+                let prevalive = tokens.get(token).map_or(false, |t| t.born < round);
+                if !prevalive {
+                    continue;
+                }
+
+                // the children of this branch are its one-character left/right extensions, read
+                // straight off the parent's occurrence positions. a set of start positions
+                // dedupes an extension reachable from both its prefix and its suffix parent.
+                for &i in positions.iter() {
+                    if i + level < n {
+                        nxt.entry(&text[boff[i]..boff[i + level + 1]]).or_default().insert(i);
+                    }
+                    if i >= 1 {
+                        nxt.entry(&text[boff[i - 1]..boff[i + level]]).or_default().insert(i - 1);
+                    }
+                }
             }
-            modifications[id] += count_nonoverlapping(tb, p);
+            current = nxt;
+            level += 1;
         }
 
-        let parts = split_with_seps(tb, &first_byte, &splits);
-
-        // wordcounts in first-encounter order; whitespace-only parts are excluded so
-        // \n, \t, etc. never enter the cache and ' ' is only counted via the explicit
-        // survivors[' '] += text.count(' ') above.
-        let mut wc_order: Vec<&[u8]> = Vec::new();
-        let mut wc_counts: HashMap<&[u8], i64> = HashMap::new();
-        for part in parts {
-            if part.is_empty() {
+        // --- births + raw counts ---
+        for (&token, &occ) in present.iter() {
+            if let Some(t) = tokens.get_mut(token) {
+                // already living — accrue raw occurrences (score handled below)
+                t.count += occ;
                 continue;
             }
-            // SAFETY: parts are byte ranges of valid utf-8 text at codepoint boundaries
-            let part_str = unsafe { std::str::from_utf8_unchecked(part) };
-            if part_str.chars().all(|c| c.is_whitespace()) {
-                continue;
-            }
-            match wc_counts.get_mut(part) {
-                Some(v) => *v += 1,
-                None => {
-                    wc_counts.insert(part, 1);
-                    wc_order.push(part);
-                }
-            }
-        }
 
-        for word_bytes in wc_order {
-            let wordcount = wc_counts[word_bytes];
-            // SAFETY: parts are byte ranges of valid utf-8 text, split at codepoint-safe
-            // boundaries (UTF-8 self-synchronizing, all split tokens are full codepoints).
-            let word_str = unsafe { std::str::from_utf8_unchecked(word_bytes) };
-
-            if !tokencache.contains_key(word_str) {
-                let order_counts = make_token_order(word_str);
-                let mut interned: Vec<(u32, i64)> = Vec::with_capacity(order_counts.len());
-                for (tok, c) in order_counts {
-                    let id = interner.intern(&tok);
-                    interned.push((id, c));
-                }
-                tokencache.insert(word_str.to_string(), interned);
-                ensure_capacity(interner.strs.len(), &mut modifications, &mut was_touched);
-            }
-
-            let entries = tokencache.get(word_str).unwrap();
-            for &(id, tokencount) in entries {
-                let idu = id as usize;
-                if !was_touched[idu] {
-                    was_touched[idu] = true;
-                    touched.push(id);
-                }
-                modifications[idu] += tokencount * wordcount;
-            }
-        }
-
-        // apply modifications to survivors; if a token previously "died" but its
-        // substring reappears, resurrect it (matches Python's del+recreate semantics:
-        // survivors[token] is reset to the new count, misses is cleared, and the
-        // token's dict-insertion position moves to the end for tie-breaking)
-        for &id in &touched {
-            let idu = id as usize;
-            if !interner.alive[idu] {
-                interner.alive[idu] = true;
-                interner.survivors[idu] = modifications[idu];
-                interner.misses[idu] = 0;
-                interner.bump_position(id);
+            // a brand-new token. length-2 tokens grow straight off the base layer; any longer
+            // token only reached `present` by extending a living (prevalive) parent, so it is
+            // guaranteed eligible — we just recover which parent(s) to link it to.
+            let livingparents: Vec<String> = if token.chars().count() == 2 {
+                Vec::new()
             } else {
-                interner.survivors[idu] += modifications[idu];
+                let pre = drop_last(token);
+                let suf = drop_first(token);
+                let mut lp: Vec<String> = Vec::new();
+                if tokens.get(pre).map_or(false, |t| t.born < round) {
+                    lp.push(pre.to_string());
+                }
+                if tokens.get(suf).map_or(false, |t| t.born < round) {
+                    lp.push(suf.to_string());
+                }
+                if lp.is_empty() {
+                    continue; // safety; shouldn't happen given how `present` is built
+                }
+                lp
+            };
+
+            // born as a fresh leaf; the survival game below gives it its first +1
+            tokens.insert(
+                token.to_string(),
+                Tok { score: DEATHFLOOR, misses: 0, count: occ, born: round },
+            );
+            leaves.insert(token.to_string());
+            for p in &livingparents {
+                children.entry(p.clone()).or_default().insert(token.to_string());
+                leaves.remove(p); // parent now has a child -> frozen, off the frontier
             }
+            parents.insert(token.to_string(), livingparents);
         }
 
-        // cull every alive token
-        let n_ids = interner.strs.len();
-        for id in 0..n_ids {
-            if !interner.alive[id] {
+        // --- the survival game — only the frontier leaves play it ---
+        let leaf_snapshot: Vec<String> = leaves.iter().cloned().collect();
+        for token in leaf_snapshot {
+            if present.contains_key(token.as_str()) {
+                if let Some(t) = tokens.get_mut(&token) {
+                    t.score += 1;
+                    t.misses = 0; // reappeared: reset the grace counter
+                }
                 continue;
             }
-            if was_touched[id] {
-                interner.misses[id] = 0;
-            } else if interner.survivors[id] <= 0 {
-                interner.misses[id] += 1;
-                if interner.misses[id] >= survivalrounds {
-                    interner.alive[id] = false;
+            let dead = {
+                let t = tokens.get_mut(&token).expect("leaf must be alive");
+                if t.score > DEATHFLOOR {
+                    t.score -= 1; // still above the floor: just decay
+                    false
+                } else {
+                    // sitting at the death floor: burn a grace round, die after survivalrounds
+                    t.misses += 1;
+                    t.misses >= survivalrounds
                 }
-            } else {
-                interner.survivors[id] -= 1;
+            };
+            if !dead {
+                continue;
             }
+            // this branch tip is dead — remove it and detach from its parents, re-promoting
+            // any parent that has now lost its last child
+            leaves.remove(&token);
+            tokens.remove(&token);
+            if let Some(ps) = parents.remove(&token) {
+                for p in ps {
+                    if let Some(cs) = children.get_mut(&p) {
+                        cs.remove(&token);
+                        if cs.is_empty() {
+                            children.remove(&p);
+                            if tokens.contains_key(&p) {
+                                leaves.insert(p);
+                            }
+                        }
+                    }
+                }
+            }
+            children.remove(&token);
         }
-
-        // reset per-paragraph scratch
-        for &id in &touched {
-            let idu = id as usize;
-            modifications[idu] = 0;
-            was_touched[idu] = false;
-        }
-        touched.clear();
     }
 
     let survival_seconds = nt.elapsed().as_secs_f64();
-    println!("token survival game end {}", survival_seconds);
+    println!("hierarchical survival game end {}", survival_seconds);
+    println!("base layer (single chars): {}", singles.len());
+    println!("surviving multi tokens: {}", tokens.len());
 
-    let alive_count = interner.alive.iter().filter(|a| **a).count();
-    println!("total tokens: {}", alive_count);
-    println!("total words: {}", tokencache.len());
-
+    // --- consolidation ---
     let nt = Instant::now();
-    println!("middle sort start");
-
-    let mut alive_list: Vec<(u32, i64, u32)> = (0..interner.strs.len() as u32)
-        .filter(|&id| interner.alive[id as usize])
-        .map(|id| (id, interner.survivors[id as usize], interner.positions[id as usize]))
-        .collect();
-    // descending count, then ascending current dict-insertion position — matches
-    // Python's stable sort over Counter.items() after potential del+reinsert
-    alive_list.sort_by(|a, b| b.1.cmp(&a.1).then(a.2.cmp(&b.2)));
-
-    // middle-sort: odd indices to the left (in reverse), even indices to the right
-    let n = alive_list.len();
-    let mut odds: Vec<u32> = Vec::with_capacity(n / 2);
-    let mut evens: Vec<u32> = Vec::with_capacity(n - n / 2);
-    for (i, (id, _, _)) in alive_list.iter().enumerate() {
-        if i % 2 == 1 {
-            odds.push(*id);
-        } else {
-            evens.push(*id);
+    println!("consolidation start");
+    let mut removed: FxHashSet<String> = FxHashSet::default();
+    for (parent, ptok) in tokens.iter() {
+        if let Some(cs) = children.get(parent) {
+            for child in cs.iter() {
+                if let Some(ctok) = tokens.get(child) {
+                    if ptok.count == ctok.count {
+                        removed.insert(parent.clone());
+                        break;
+                    }
+                }
+            }
         }
     }
-    odds.reverse();
-    let mut middle: Vec<u32> = Vec::with_capacity(n);
-    middle.extend(odds);
-    middle.extend(evens);
+    println!("consolidated away: {}", removed.len());
+    println!("consolidation end {}", nt.elapsed().as_secs_f64());
 
-    let middle_sort_seconds = nt.elapsed().as_secs_f64();
-    println!("middle sort finished {}", middle_sort_seconds);
-
+    // --- coverage sanity check ---
     if run_coverage {
-    let coverage_nt = Instant::now();
-    println!("token coverage test start");
+        let nt = Instant::now();
+        println!("token coverage test start");
 
-    // tokencache keys are exactly the words encountered (Python's `allwords`).
-    let allwords: Vec<&String> = tokencache.keys().collect();
-    let token_set: HashSet<&str> = interner
-        .strs
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| interner.alive[*i])
-        .map(|(_, s)| s.as_str())
-        .collect();
-
-    println!("total tokens: {}", token_set.len());
-    println!("total words: {}", allwords.len());
-
-    let mut covered: usize = 0;
-    let mut boundaries: Vec<usize> = Vec::new();
-    let mut reached: Vec<bool> = Vec::new();
-    for word in &allwords {
-        let bytes = word.as_bytes();
-        boundaries.clear();
-        for (i, _) in word.char_indices() {
-            boundaries.push(i);
+        // final token set = permanent base layer + surviving grown tokens (minus consolidated)
+        let mut token_set: FxHashSet<String> = FxHashSet::default();
+        for c in singles.keys() {
+            token_set.insert(c.to_string());
         }
-        boundaries.push(bytes.len());
-        let cp = boundaries.len() - 1;
-        reached.clear();
-        reached.resize(cp + 1, false);
-        reached[0] = true;
-        for start in 0..cp {
-            if !reached[start] {
-                continue;
+        for t in tokens.keys() {
+            if !removed.contains(t) {
+                token_set.insert(t.clone());
             }
-            for end in (start + 1)..=cp {
-                // SAFETY: slice between char boundaries of valid utf-8
-                let sub = unsafe {
-                    std::str::from_utf8_unchecked(&bytes[boundaries[start]..boundaries[end]])
-                };
-                if token_set.contains(sub) {
-                    reached[end] = true;
+        }
+
+        println!("total tokens: {}", token_set.len());
+        println!("total words: {}", allwords.len());
+
+        let mut covered: usize = 0;
+        let mut boundaries: Vec<usize> = Vec::new();
+        let mut reached: Vec<bool> = Vec::new();
+        for word in &allwords {
+            let bytes = word.as_bytes();
+            boundaries.clear();
+            for (i, _) in word.char_indices() {
+                boundaries.push(i);
+            }
+            boundaries.push(bytes.len());
+            let cp = boundaries.len() - 1;
+            reached.clear();
+            reached.resize(cp + 1, false);
+            reached[0] = true;
+            for start in 0..cp {
+                if !reached[start] {
+                    continue;
+                }
+                for end in (start + 1)..=cp {
+                    // SAFETY: slice between char boundaries of valid utf-8
+                    let sub = unsafe {
+                        std::str::from_utf8_unchecked(&bytes[boundaries[start]..boundaries[end]])
+                    };
+                    if token_set.contains(sub) {
+                        reached[end] = true;
+                    }
+                }
+                if reached[cp] {
+                    break;
                 }
             }
             if reached[cp] {
-                break;
+                covered += 1;
             }
         }
-        if reached[cp] {
-            covered += 1;
-        }
+
+        let total_words = allwords.len();
+        let uncovered = total_words - covered;
+        let percent = if total_words == 0 { 0.0 } else { covered as f64 / total_words as f64 };
+        println!("covered words: {} / {}", covered, total_words);
+        println!("percent covered: {}", percent);
+        println!("uncovered words: {}", uncovered);
+        println!("token coverage test end {}", nt.elapsed().as_secs_f64());
     }
 
-    let coverage_seconds = coverage_nt.elapsed().as_secs_f64();
-    let total_words = allwords.len();
-    let uncovered = total_words - covered;
-    let percent_covered = if total_words == 0 {
-        0.0
-    } else {
-        covered as f64 / total_words as f64
-    };
-    println!("covered words: {} / {}", covered, total_words);
-    println!("percent covered: {}", percent_covered);
-    println!("uncovered words: {}", uncovered);
-    println!("token coverage test end {}", coverage_seconds);
-    }
-
+    // --- write final tokens: one JSON-encoded string per line (order irrelevant) ---
     let mut out = BufWriter::new(File::create(&outputfile)?);
-    for id in &middle {
-        let s = &interner.strs[*id as usize];
-        writeln!(out, "{}", serde_json::to_string(s)?)?;
+    for c in singles.keys() {
+        let s = c.to_string();
+        writeln!(out, "{}", serde_json::to_string(&s)?)?;
+    }
+    for token in tokens.keys() {
+        if removed.contains(token) {
+            continue;
+        }
+        writeln!(out, "{}", serde_json::to_string(token)?)?;
     }
     out.flush()?;
 
