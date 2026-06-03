@@ -8,48 +8,55 @@ from read_paragraphs import read_paragraphs
 
 @dataclass
 class Config:
-    #number of possible token IDs
-        #this gets set after the tokenizer builds the vocabulary from tokenpath
-        #+ 1 padding token
-        #+ 1 end-of-text token
-        #+ however many token strings are found in tokenpath
-    vocab_size: int = 0
+    #all of these values are configured in main.py, the configuration gateway
+    #they are required arguments here so training.py holds no hardcoded settings
 
     #number of tokens per training chunk
-    context_length: int = 128
+    context_length: int
 
     #width of the model's internal token vector
-    #means every token becomes a vector with 256 numbers
-    d_model: int = 256
+    #means every token becomes a vector with this many numbers
+    d_model: int
 
     #number of transformer blocks
     #each block contains:
         #attention
         #feed-forward / MLP
-    n_layers: int = 2
+    n_layers: int
 
     #width of one attention head.
     #n_heads is calculated from: n_heads = d_model / head_dim
-    head_dim: int = 64
+    head_dim: int
 
     #controls how wide the MLP part gets inside each transformer block
     #(multi-layer perceptron)
-    mlp_multiplier: float = 4.0
+    mlp_multiplier: float
 
     #path to the token word list the tokenizer is built from
-    tokenpath: str = '/home/sfo/data/models/tokens/text-chunks.jsonl'
+    tokenpath: str
 
     #corpus the training paragraphs are read from
-    textsource: str = '/home/sfo/store/gutenberg/gutenbooks/'
+    textsource: str
 
     #number of chunks trained together in one update
-    batch_size: int = 8
+    batch_size: int
 
     #how large each training update is
-    learning_rate: float = 1e-3
+    learning_rate: float
 
-    #get batch, predict next tokens, calculate loss, calculate gradients, update weights, repeat __this-many__ times
-    train_steps: int = 2000
+    #number of training steps to run
+    train_steps: int
+
+    #how often (in steps) to print the training loss to stdout
+    log_every: int
+
+    #number of possible token IDs
+        #this gets set after the tokenizer builds the vocabulary from tokenpath
+        #+ 1 padding token
+        #+ 1 end-of-text token
+        #+ however many token strings are found in tokenpath
+    #the only field not set by main: it is filled in by train() after the tokenizer is built
+    vocab_size: int = 0
 
     @property
     def n_heads(self):
@@ -75,14 +82,6 @@ class VocabTokenizer:
     converts token text into token IDs.
     """
 
-    #not actively used here because chunks are always exactly context_length tokens
-    #reserved so token ID 0 never means a real token
-    #would be used to fill shorter examples if you later train variable-length chunks
-    pad_id: int = 0
-
-    #stop codon
-    eos_id: int = 1
-
     #maps each token string to one token ID
     token_to_id: dict
 
@@ -94,6 +93,14 @@ class VocabTokenizer:
 
     #number of possible token IDs
     vocab_size: int
+
+    #not actively used here because chunks are always exactly context_length tokens
+    #reserved so token ID 0 never means a real token
+    #would be used to fill shorter examples if you later train variable-length chunks
+    pad_id: int = 0
+
+    #stop codon
+    eos_id: int = 1
 
     def encode(self, text):
         """
@@ -162,22 +169,24 @@ def build_tokenizer_from_jsonl(path):
         "<EOS>": 1,
     }
 
+    #word_survival writes one surviving token per line, each line a JSON-encoded
+    #string (serde_json::to_string), e.g. "ing" — not an object with a 'text' field
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
-            row = json.loads(line)
+            line = line.strip()
 
-            if "text" not in row:
-                raise ValueError("Each JSONL row must contain a 'text' field.")
-
-            text = row["text"].strip()
-
-            if text == "":
+            if line == "":
                 continue
 
-            #each whitespace-separated item is treated as one token string
-            for token in text.split():
-                if token not in token_to_id:
-                    token_to_id[token] = len(token_to_id)
+            #each line decodes to exactly one token string
+            #don't split on whitespace: a token may itself be punctuation/whitespace
+            token = json.loads(line)
+
+            if token == "":
+                continue
+
+            if token not in token_to_id:
+                token_to_id[token] = len(token_to_id)
 
     #reverse lookup for decode()
     id_to_token = {
@@ -787,7 +796,7 @@ def generate(prompt, tokenizer, p, cfg, max_new_tokens=100):
     return tokenizer.decode(ids)
 
 
-def train():
+def train(cfg):
     """
     main training loop
         load config
@@ -799,9 +808,10 @@ def train():
         backward pass
         update weights
         repeat
-    """
 
-    cfg = Config()
+    cfg: a fully-populated Config with all paths/hyperparameters set by the
+         caller. main.py is the configuration gateway that builds it.
+    """
 
     tokenizer = build_tokenizer_from_jsonl(cfg.tokenpath)
 
@@ -861,11 +871,15 @@ def train():
             step=step,
         )
 
-        if step % 100 == 0:
-            print(f"step={step} loss={loss:.4f}")
+        #print the starting loss (step 1) so the baseline the descent works
+        #down from is visible, then print every log_every steps after that
+        #flush=True so the loss appears live even when stdout is piped/redirected
+        if step == 1 or step % cfg.log_every == 0:
+            print(f"step={step} loss={loss:.4f}", flush=True)
 
     print(generate("", tokenizer, p, cfg))
 
 
 if __name__ == "__main__":
-    train()
+    #training is configured and launched from main.py, the configuration gateway
+    raise SystemExit("run main.py to configure and start training")
