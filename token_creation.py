@@ -3,6 +3,8 @@ from pathlib import Path
 import json
 import string
 import subprocess
+import tempfile
+import os
 
 RUST_PROJECT = Path(__file__).resolve().parent / 'token_survival'
 
@@ -29,25 +31,32 @@ def create_tokens(paragraphs, output_file, survival_rounds=50, token_word_covera
         'endpunctuation': endpunctuation,
     }
 
-    finaltextpath = datafolder / 'finaltext.jsonl'
     configpath = datafolder / 'config.json'
 
     nt = time()
     print('token survival start')
 
-    with open(finaltextpath, 'w', encoding='utf-8') as f:
-        for paragraph in paragraphs:
-            f.write(json.dumps(paragraph, ensure_ascii=False) + '\n')
+    # The finaltext input is huge and is only consumed by the rust binary as a
+    # scratch input. Write it to a temp file and delete it afterwards so it is
+    # never persisted in the repo data folder.
+    fd, finaltext_tmp = tempfile.mkstemp(suffix='.jsonl', prefix='finaltext_')
+    finaltextpath = Path(finaltext_tmp)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            for paragraph in paragraphs:
+                f.write(json.dumps(paragraph, ensure_ascii=False) + '\n')
 
-    with open(configpath, 'w', encoding='utf-8') as f:
-        json.dump(config, f, ensure_ascii=False)
+        with open(configpath, 'w', encoding='utf-8') as f:
+            json.dump(config, f, ensure_ascii=False)
 
-    subprocess.run(
-        ['cargo', 'run', '--release', '--',
-         str(finaltextpath), str(configpath), str(output_file),
-         '1' if token_word_coverage_test else '0'],
-        cwd=RUST_PROJECT, check=True,
-    )
+        subprocess.run(
+            ['cargo', 'run', '--release', '--',
+             str(finaltextpath), str(configpath), str(output_file),
+             '1' if token_word_coverage_test else '0'],
+            cwd=RUST_PROJECT, check=True,
+        )
+    finally:
+        finaltextpath.unlink(missing_ok=True)
 
     print('token survival end', time() - nt)
 
