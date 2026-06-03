@@ -4,12 +4,14 @@ import json
 import string
 import subprocess
 
+from read_paragraphs import read_paragraphs
+
 survivalproject = Path(__file__).resolve().parent / 'survival_game'
 
 endpunctuation = ['.', '!', '?']
 
 
-def word_survival(paragraphs, output, survivalrounds, coveragetest=True):
+def word_survival(textsource, output, survivalrounds, coveragetest=True):
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
 
@@ -35,7 +37,7 @@ def word_survival(paragraphs, output, survivalrounds, coveragetest=True):
          '1' if coveragetest else '0'],
         cwd=survivalproject, stdin=subprocess.PIPE, text=True, encoding='utf-8',
     )
-    for paragraph in paragraphs:
+    for paragraph in read_paragraphs(textsource):
         proc.stdin.write(json.dumps(paragraph, ensure_ascii=False) + '\n')
     proc.stdin.close()
     if proc.wait() != 0:

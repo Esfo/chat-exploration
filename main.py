@@ -1,4 +1,3 @@
-from read_paragraphs import read_paragraphs
 from word_survival import word_survival
 
 
@@ -17,10 +16,8 @@ coveragetest = True
 
 #=== pipeline ===
 
-paragraphs = read_paragraphs(textsource)
-
 if tokenoutput:
-    tokensfile = word_survival(paragraphs, tokenoutput, survivalrounds, coveragetest)
+    tokensfile = word_survival(textsource, tokenoutput, survivalrounds, coveragetest)
     print('tokens written to', tokensfile)
 else:
     tokensfile = tokeninput
