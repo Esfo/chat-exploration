@@ -1,21 +1,27 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-text = "banana"           #the basic example the model must learn to predict
+text = "test string to be predicted"  #the basic example the model must learn to predict
 learning_rate = 0.5       #how hard each round nudges the weights
-hidden_size = 8           #width of the middle layer the error backpropagates through
+hidden_size = 32          #width of the middle layer the error backpropagates through
 max_rounds = 10000        #safety cap so the loop can't run forever
 
 chars = sorted(set(text))
 char_id = {c: i for i, c in enumerate(chars)}
 ids = np.array([char_id[c] for c in text])
 vocab = len(chars)
+length = len(ids) - 1     #number of next-character predictions to make
 
-current = np.eye(vocab)[ids[:-1]]  #each character the model sees, as a one-hot row
+#the model sees each character AND its position, so repeated characters can be
+#told apart by where they sit (this is what training.py's position embeddings do)
+tokens = np.eye(vocab)[ids[:-1]]    #each character as a one-hot row
+positions = np.eye(length)         #each position as a one-hot row
+current = np.concatenate([tokens, positions], axis=1)
 following = ids[1:]                #the character id that should come next
+input_size = vocab + length
 
 rng = np.random.default_rng(0)
-w1 = rng.normal(0, 1 / np.sqrt(vocab), (vocab, hidden_size))        #input -> hidden weights
+w1 = rng.normal(0, 1 / np.sqrt(input_size), (input_size, hidden_size))  #input -> hidden weights
 w2 = rng.normal(0, 1 / np.sqrt(hidden_size), (hidden_size, vocab))  #hidden -> output weights
 losses = []
 rounds = 0
@@ -57,8 +63,9 @@ solved = bool((guesses == following).all())
 #let the trained model write the text out, one character at a time
 c = char_id[text[0]]
 generated = [chars[c]]
-for _ in range(len(text) - 1):
-    hidden = np.maximum(np.eye(vocab)[c] @ w1, 0)
+for position in range(length):
+    feature = np.concatenate([np.eye(vocab)[c], np.eye(length)[position]])  #character + where we are
+    hidden = np.maximum(feature @ w1, 0)
     c = int((hidden @ w2).argmax())  #the next character feeds back in to pick the one after it
     generated.append(chars[c])
 
