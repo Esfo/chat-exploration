@@ -67,6 +67,17 @@ def load_corpus(folder):
     return finaltext
 
 
+def run_tokens(output, corpus=DEFAULT_CORPUS, survival_rounds=50):
+    """Read and filter the corpus, then build the survival-token word list at
+    output. Returns the output Path."""
+    nt = time()
+    print('file reading start')
+    finaltext = load_corpus(corpus)
+    print('file reading end', time() - nt)
+
+    return create_tokens(finaltext, output, survival_rounds=survival_rounds)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Build the survival-token word list from a text corpus.')
@@ -77,12 +88,8 @@ def main():
     parser.add_argument('--survival-rounds', type=int, default=50)
     args = parser.parse_args()
 
-    nt = time()
-    print('file reading start')
-    finaltext = load_corpus(args.corpus)
-    print('file reading end', time() - nt)
-
-    create_tokens(finaltext, args.output, survival_rounds=args.survival_rounds)
+    run_tokens(args.output, corpus=args.corpus,
+               survival_rounds=args.survival_rounds)
 
 
 if __name__ == '__main__':
