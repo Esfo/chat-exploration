@@ -107,8 +107,11 @@ print('file reading end', time() - nt)
 #  - score: the +1/-1 survival score above, which decides life and death
 #  - count: the raw cumulative occurrence count, which is only used for consolidation
 #
-#a token can only be born once at least one of its (length-1) end-substrings is already
-#a living token, so branches genuinely build 2 -> 3 -> 4 -> ... upward.
+#a token can only be born once at least one of its (length-1) end-substrings was already
+#a living token coming INTO the round (see prevalive below). this means branches grow at
+#most one level deeper per round - a freshly (re)born length-2 cannot immediately spawn a
+#length-3 in the same round; its parent has to have survived from an earlier round first.
+#so branches genuinely build 2 -> 3 -> 4 -> ... upward over time.
 
 deathfloor = 0   #a leaf dies when its survival score drops to this
 
@@ -147,8 +150,13 @@ for text in finaltext:
         for token, tokencount in cached.items():
             modifications[token] += tokencount * wordcount
 
-    #births + raw counts, shortest-first so a parent born this round is available to its
-    #children in the very same round (this is what lets branches cascade upward)
+    #snapshot of who was alive coming INTO this round. births are gated against this
+    #snapshot (not the live `score`), so a parent that is (re)born this round cannot also
+    #parent a longer child this round - each branch can only grow one level deeper per
+    #round, and only off a parent that already proved it was alive beforehand.
+    prevalive = frozenset(score)
+
+    #births + raw counts, shortest-first
     for token in sorted(modifications, key=len):
         occ = modifications[token]
 
@@ -169,9 +177,9 @@ for text in finaltext:
         if len(token) == 2:
             livingparents = ()                      #parents are base-layer singles
         else:
-            livingparents = [p for p in (prefix, suffix) if p in score]
+            livingparents = [p for p in (prefix, suffix) if p in prevalive]
             if not livingparents:
-                #no living branch to grow from yet - it stays unborn for now
+                #no parent that was already alive coming into this round - stay unborn
                 continue
 
         #born as a fresh leaf; the survival game below gives it its first +1
