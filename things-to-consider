@@ -1,0 +1,14 @@
+RMSNorm or LayerNorm
+RoPE positional encoding
+SwiGLU or gated MLP
+mixed precision training
+GPU kernel
+distributed training
+gradient clipping
+learning-rate schedule
+checkpointing
+validation loop
+proper sampling controls
+weight tying
+KV cache for inference
+optimized attention

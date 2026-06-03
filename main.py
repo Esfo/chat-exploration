@@ -7,10 +7,10 @@ survival_rounds = 50
 
 input_path = '/home/sfo/store/gutenberg/gutenbooks/'
 
-token_output = '/home/sfo/data/models/tokens/survival-tokens.jsonl'
+token_output = '/home/sfo/data/models/tokens/text-chunks.jsonl'
 #token_output = False
 
-token_input_file = '/home/sfo/data/models/tokens/survival-tokens.jsonl'
+#token_input_file = '/home/sfo/data/models/tokens/text-chunks.jsonl'
 
 token_word_coverage_test = True
 #token_word_coverage_test = False
