@@ -118,9 +118,12 @@ deathfloor = 0   #a leaf dies when its survival score drops to this
 nt = time()
 print('hierarchical survival game begin')
 
+#the survival game runs on the RAW paragraph text - spaces and punctuation included - so
+#that " " and friends are real, linkable characters that tokens can grow across (e.g.
+#"the ", " of "). we only split into words to build `allwords` for the coverage test.
 wordsplits = spaces + ['--'] + punctuation
 wordsplits = sorted(set(wordsplits), key=len, reverse=True)
-pattern = '(' + '|'.join(map(re.escape, wordsplits)) + ')'
+wordpattern = '(' + '|'.join(map(re.escape, wordsplits)) + ')'
 
 allwords = set()
 singles = Counter()              #the permanent base layer: char -> count (never removed)
@@ -129,26 +132,24 @@ score = {}                       #living multi-char token -> +1/-1 survival scor
 leaves = set()                   #the frontier: living tokens with no living children
 children = defaultdict(set)      #token -> set of living child tokens grown from it
 parents = {}                     #token -> set of the (len-1) end-substrings it grew from
-tokencache = {}                  #word -> Counter of every substring it contains
+lengthcounts = Counter()         #token length -> how many living tokens have it
 
 for text in finaltext:
-    #separating out words
-    words = [part for part in re.split(pattern, text) if part]
-    wordcounts = Counter(words)
-    allwords.update(wordcounts)
+    #words are only needed for the coverage sanity check, not for the game itself
+    allwords.update(part for part in re.split(wordpattern, text) if part)
 
-    #count every substring present in this text (all lengths at once)
+    #only enumerate one level deeper than the deepest CURRENTLY living token. this tracks
+    #the living set (so it shrinks again when long branches die), and thanks to the
+    #one-level-per-round rule it stays small - just bigrams early on.
+    maxlen = (max(lengthcounts) + 1) if lengthcounts else 2
+
+    #enumerate every substring of the raw text up to maxlen, straight off the raw
+    #character stream so spaces/punctuation are real, linkable characters.
     modifications = Counter()
-    for word, wordcount in wordcounts.items():
-        cached = tokencache.get(word)
-        if cached is None:
-            cached = Counter()
-            for size in range(1, len(word) + 1):
-                for start in range(0, len(word) - size + 1):
-                    cached[word[start:start + size]] += 1
-            tokencache[word] = cached
-        for token, tokencount in cached.items():
-            modifications[token] += tokencount * wordcount
+    textlen = len(text)
+    for size in range(1, maxlen + 1):
+        for start in range(0, textlen - size + 1):
+            modifications[text[start:start + size]] += 1
 
     #snapshot of who was alive coming INTO this round. births are gated against this
     #snapshot (not the live `score`), so a parent that is (re)born this round cannot also
@@ -187,6 +188,7 @@ for text in finaltext:
         count[token] = occ
         leaves.add(token)
         parents[token] = set(livingparents)
+        lengthcounts[len(token)] += 1
         for p in livingparents:
             children[p].add(token)
             leaves.discard(p)   #parent now has a child -> frozen, off the frontier
@@ -203,6 +205,9 @@ for text in finaltext:
                 leaves.discard(token)
                 del score[token]
                 del count[token]
+                lengthcounts[len(token)] -= 1
+                if lengthcounts[len(token)] <= 0:
+                    del lengthcounts[len(token)]
                 for p in parents.pop(token, ()):
                     childset = children.get(p)
                     if childset is not None:
