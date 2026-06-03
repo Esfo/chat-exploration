@@ -6,6 +6,8 @@ learning_rate = 0.05       #step size: too big and it blows up, too small and it
 start_weights = [4.5, 3.0] #the model's two weights before this step of training
 sensitivity = [1.0, 12.0]  #how hard the loss reacts to each weight (uneven on purpose)
 max_steps = 80             #how many update steps to take
+beta1 = 0.9                #adam: how much of the old gradient average to keep
+beta2 = 0.999              #adam: how much of the old squared-gradient average to keep
 
 weights = np.array(start_weights, dtype=float)
 sensitivity = np.array(sensitivity, dtype=float)
@@ -19,10 +21,10 @@ for step in range(1, max_steps + 1):
     if method == "plain":
         weights = weights - learning_rate * gradient
     else:
-        m = 0.9 * m + 0.1 * gradient
-        v = 0.999 * v + 0.001 * gradient ** 2
-        m = m / (1 - 0.9 ** step)     #the averages start at zero, so scale them up early
-        v = v / (1 - 0.999 ** step)
+        m = beta1 * m + (1 - beta1) * gradient
+        v = beta2 * v + (1 - beta2) * gradient ** 2
+        m = m / (1 - beta1 ** step)   #the averages start at zero, so scale them up early
+        v = v / (1 - beta2 ** step)
         weights = weights - learning_rate * m / (np.sqrt(v) + 1e-8)
     path.append(weights.copy())
 
