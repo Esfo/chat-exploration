@@ -94,15 +94,23 @@ print('file reading end', time() - nt)
 #  a length-4 token is grown the same way from a surviving length-3 token, and so on
 #    with no ceiling, as long as the extended branch keeps surviving
 #
-#each token plays a cumulative survival game:
-#  - while it appears in a text it gains its occurrence count
-#  - while it is absent it loses 1 per round, and after `survivalrounds` consecutive
-#    misses (with a non-positive count) it dies
-#  - BUT a parent is protected: it never takes the -1 penalty while it still has at
-#    least one living child branch. it can only start decaying once every child is gone.
+#the survival game only ever touches the FRONTIER - the leaf tips of each branch:
+#  - a leaf that appears this round gains +1 to its survival score
+#  - a leaf that is absent loses 1, and dies once its score drops to 0
+#  - an internal node (a parent that still has a living child) is frozen: it gets
+#    neither +1 nor -1. it only re-enters the game once every one of its children
+#    has died, at which point it becomes a leaf again.
+#this is the whole point of the hierarchy for performance: each round we iterate only
+#the leaves, never the full survivor set.
+#
+#two separate numbers are tracked per token:
+#  - score: the +1/-1 survival score above, which decides life and death
+#  - count: the raw cumulative occurrence count, which is only used for consolidation
 #
 #a token can only be born once at least one of its (length-1) end-substrings is already
 #a living token, so branches genuinely build 2 -> 3 -> 4 -> ... upward.
+
+deathfloor = 0   #a leaf dies when its survival score drops to this
 
 nt = time()
 print('hierarchical survival game begin')
@@ -113,8 +121,9 @@ pattern = '(' + '|'.join(map(re.escape, wordsplits)) + ')'
 
 allwords = set()
 singles = Counter()              #the permanent base layer: char -> count (never removed)
-survivors = Counter()            #living multi-character tokens: token -> count
-misses = Counter()               #token -> consecutive rounds missed
+count = Counter()                #living multi-char token -> raw cumulative occurrences
+score = {}                       #living multi-char token -> +1/-1 survival score
+leaves = set()                   #the frontier: living tokens with no living children
 children = defaultdict(set)      #token -> set of living child tokens grown from it
 parents = {}                     #token -> set of the (len-1) end-substrings it grew from
 tokencache = {}                  #word -> Counter of every substring it contains
@@ -138,75 +147,69 @@ for text in finaltext:
         for token, tokencount in cached.items():
             modifications[token] += tokencount * wordcount
 
-    #process tokens shortest-first so a parent born this round is available to its
+    #births + raw counts, shortest-first so a parent born this round is available to its
     #children in the very same round (this is what lets branches cascade upward)
     for token in sorted(modifications, key=len):
-        count = modifications[token]
+        occ = modifications[token]
 
         if len(token) == 1:
             #base layer - always exists, simply accrues its count
-            singles[token] += count
+            singles[token] += occ
             continue
 
-        if token in survivors:
-            #already living - feed it and reset its miss streak
-            survivors[token] += count
-            misses.pop(token, None)
+        if token in score:
+            #already living - just accrue its raw occurrences (score handled below)
+            count[token] += occ
             continue
 
         #candidate for birth: it needs a living parent end-substring.
         #length-2 tokens grow straight off the permanent base layer, so they always qualify.
         prefix = token[:-1]   #drop last char
         suffix = token[1:]    #drop first char
-        livingparents = set()
         if len(token) == 2:
-            #parents are single characters (the base layer) - implicitly alive
-            livingparents.update(p for p in (prefix, suffix) if p in singles or len(p) == 1)
+            livingparents = ()                      #parents are base-layer singles
         else:
-            if prefix in survivors:
-                livingparents.add(prefix)
-            if suffix in survivors:
-                livingparents.add(suffix)
+            livingparents = [p for p in (prefix, suffix) if p in score]
+            if not livingparents:
+                #no living branch to grow from yet - it stays unborn for now
+                continue
 
-        if not livingparents:
-            #no living branch to grow from yet - it stays unborn for now
-            continue
-
-        #born
-        survivors[token] = count
-        misses.pop(token, None)
+        #born as a fresh leaf; the survival game below gives it its first +1
+        score[token] = deathfloor
+        count[token] = occ
+        leaves.add(token)
         parents[token] = set(livingparents)
         for p in livingparents:
-            if len(p) > 1:
-                children[p].add(token)
+            children[p].add(token)
+            leaves.discard(p)   #parent now has a child -> frozen, off the frontier
 
-    #killing the unworthy (with parent protection)
-    for token in tuple(survivors):
+    #the survival game - only the frontier leaves play it
+    for token in tuple(leaves):
         if token in modifications:
-            continue
-
-        #protected: a parent never decays while it still has a living child branch
-        if children.get(token):
-            continue
-
-        if survivors[token] > 0:
-            survivors[token] -= 1
+            score[token] += 1
         else:
-            misses[token] += 1
-            if misses[token] >= survivalrounds:
-                #this branch tip is dead - detach it from its parents so they can
-                #eventually start decaying once all their own children are gone
+            score[token] -= 1
+            if score[token] <= deathfloor:
+                #this branch tip is dead - remove it and detach from its parents,
+                #re-promoting any parent that has now lost its last child
+                leaves.discard(token)
+                del score[token]
+                del count[token]
                 for p in parents.pop(token, ()):
                     childset = children.get(p)
                     if childset is not None:
                         childset.discard(token)
                         if not childset:
                             del children[p]
+                            if p in score:           #parent still alive -> back to frontier
+                                leaves.add(p)
                 children.pop(token, None)
-                del survivors[token]
-                del misses[token]
 
 print('hierarchical survival game end', time() - nt)
+
+#`survivors` is just the set of living multi-char tokens, keyed by raw count for the
+#coverage test and consolidation below
+survivors = count
 
 
 #consolidation
