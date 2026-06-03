@@ -8,23 +8,21 @@ from read_paragraphs import read_paragraphs
 
 survivalproject = Path(__file__).resolve().parent / 'survival_game'
 
-endpunctuation = ['.', '!', '?']
 
-
-def word_survival(textsource, output, survivalrounds, coveragetest=True):
+def word_survival(textsource, output, coveragetest=True):
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
 
     spaces = list(string.whitespace)
     punctuation = list(string.punctuation) + ['—']
 
+    #only used to rebuild `allwords` for the coverage sanity check; the hierarchical game
+    #itself runs on the raw paragraph text so spaces/punctuation are real, linkable characters
     wordsplits = spaces + ['--'] + punctuation
     wordsplits = sorted(set(wordsplits), key=len, reverse=True)
 
     config = {
-        'survivalrounds': survivalrounds,
         'wordsplits': wordsplits,
-        'endpunctuation': endpunctuation,
     }
 
     nt = time()

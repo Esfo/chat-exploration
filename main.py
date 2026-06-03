@@ -2,9 +2,10 @@ from word_survival import word_survival
 from training import Config, train
 
 
-#=== word survival config ===
+#=== token survival config ===
 
-survivalrounds = 50
+#the hierarchical survival game has no fixed "survival rounds" dial — a leaf simply dies
+#once its +1/-1 score drops to 0 — so there is nothing to configure here anymore.
 
 textsource = '/home/sfo/store/gutenberg/gutenbooks/'
 
@@ -53,7 +54,7 @@ log_every = 100
 #=== pipeline ===
 
 if tokenoutput:
-    tokensfile = word_survival(textsource, tokenoutput, survivalrounds, coveragetest)
+    tokensfile = word_survival(textsource, tokenoutput, coveragetest)
     print('tokens written to', tokensfile)
 else:
     tokensfile = tokeninput
