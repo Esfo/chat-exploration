@@ -3,6 +3,8 @@ import numpy as np
 import math
 import json
 
+from read_paragraphs import read_paragraphs
+
 
 @dataclass
 class Config:
@@ -34,8 +36,11 @@ class Config:
     #(multi-layer perceptron)
     mlp_multiplier: float = 4.0
 
-    #path to text to be made into tokens
+    #path to the token word list the tokenizer is built from
     tokenpath: str = '/home/sfo/data/models/tokens/text-chunks.jsonl'
+
+    #corpus the training paragraphs are read from
+    textsource: str = '/home/sfo/store/gutenberg/gutenbooks/'
 
     #number of chunks trained together in one update
     batch_size: int = 8
@@ -199,23 +204,18 @@ def build_tokenizer_from_jsonl(path):
     )
 
 
-def yield_jsonl_text(path):
+def yield_jsonl_text(textsource):
     """
-    stream text rows from a JSONL file
+    stream paragraphs from the corpus, the same way they're fed into word survival
     """
 
+    #loop forever, yielding more paragraphs whenever the buffer needs more context
     while True:
-        with open(path, "r", encoding="utf-8") as f:
-            for line in f:
-                row = json.loads(line)
-
-                if "text" not in row:
-                    raise ValueError("Each JSONL row must contain a 'text' field.")
-
-                yield row["text"]
+        for paragraph in read_paragraphs(textsource):
+            yield paragraph
 
 
-def yield_token_chunks(path, tokenizer, context_length):
+def yield_token_chunks(textsource, tokenizer, context_length):
     """
     convert streamed text into fixed-size next-token training chunk
     """
@@ -224,7 +224,7 @@ def yield_token_chunks(path, tokenizer, context_length):
     #this collects tokens until we have enough to produce a training chunk
     buffer = []
 
-    for text in yield_jsonl_text(path):
+    for text in yield_jsonl_text(textsource):
         #convert text row into token IDs and add it to the rolling buffer
         buffer.extend(tokenizer.encode(text))
 
@@ -246,13 +246,13 @@ def yield_token_chunks(path, tokenizer, context_length):
             yield x, y
 
 
-def batch_stream(path, tokenizer, context_length, batch_size):
+def batch_stream(textsource, tokenizer, context_length, batch_size):
     """
     group individual chunks into batches for the model to train on
     """
 
     #create a generator that yields one x/y training chunk at a time
-    stream = yield_token_chunks(path, tokenizer, context_length)
+    stream = yield_token_chunks(textsource, tokenizer, context_length)
 
     #keep producing batches forever
     #training stops elsewhere when train_steps is reached
@@ -836,7 +836,7 @@ def train():
         #x = input token IDs
         #y = next-token target IDs
     batches = batch_stream(
-        path=cfg.tokenpath,
+        textsource=cfg.textsource,
         tokenizer=tokenizer,
         context_length=cfg.context_length,
         batch_size=cfg.batch_size,
