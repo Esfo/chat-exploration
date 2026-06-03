@@ -204,14 +204,15 @@ def build_tokenizer_from_jsonl(path):
     )
 
 
-def yield_jsonl_text(textsource):
+def yield_text(textsource):
     """
     stream paragraphs from the corpus, the same way they're fed into word survival
     """
 
-    #loop forever, yielding more paragraphs whenever the buffer needs more context
+    #read the corpus once, then loop through the same paragraphs so training never runs out
+    paragraphs = list(read_paragraphs(textsource))
     while True:
-        for paragraph in read_paragraphs(textsource):
+        for paragraph in paragraphs:
             yield paragraph
 
 
@@ -224,7 +225,7 @@ def yield_token_chunks(textsource, tokenizer, context_length):
     #this collects tokens until we have enough to produce a training chunk
     buffer = []
 
-    for text in yield_jsonl_text(textsource):
+    for text in yield_text(textsource):
         #convert text row into token IDs and add it to the rolling buffer
         buffer.extend(tokenizer.encode(text))
 
