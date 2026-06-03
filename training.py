@@ -2,6 +2,7 @@ from dataclasses import dataclass
 import numpy as np
 import math
 import json
+import time
 
 from read_paragraphs import read_paragraphs
 
@@ -853,6 +854,10 @@ def train(cfg):
         batch_size=cfg.batch_size,
     )
 
+    #wall-clock so the progress log can show how long each step takes (and prove it's
+    #moving, not frozen)
+    last_log_time = time.time()
+
     for step in range(1, cfg.train_steps + 1):
         x, y = next(batches)
 
@@ -872,10 +877,15 @@ def train(cfg):
         )
 
         #print the starting loss (step 1) so the baseline the descent works
-        #down from is visible, then print every log_every steps after that
-        #flush=True so the loss appears live even when stdout is piped/redirected
+        #down from is visible, then print every log_every steps after that.
+        #flush=True so the loss appears live even when stdout is piped/redirected.
+        #the per-step seconds make it obvious training is progressing (and how fast).
         if step == 1 or step % cfg.log_every == 0:
-            print(f"step={step} loss={loss:.4f}", flush=True)
+            now = time.time()
+            steps_since = step if step == 1 else cfg.log_every
+            per_step = (now - last_log_time) / max(1, steps_since)
+            last_log_time = now
+            print(f"step={step} loss={loss:.4f} ({per_step:.2f}s/step)", flush=True)
 
     print(generate("", tokenizer, p, cfg))
 

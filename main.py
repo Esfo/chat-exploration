@@ -50,7 +50,7 @@ learning_rate = 1e-3
 train_steps = 2000
 
 #how often (in steps) to print the training loss to stdout
-log_every = 100
+log_every = 1
 
 
 #=== pipeline ===
