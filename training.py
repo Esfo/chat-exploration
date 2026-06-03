@@ -8,48 +8,52 @@ from read_paragraphs import read_paragraphs
 
 @dataclass
 class Config:
-    #number of possible token IDs
-        #this gets set after the tokenizer builds the vocabulary from tokenpath
-        #+ 1 padding token
-        #+ 1 end-of-text token
-        #+ however many token strings are found in tokenpath
-    vocab_size: int = 0
+    #all of these values are configured in main.py, the configuration gateway
+    #they are required arguments here so training.py holds no hardcoded settings
 
     #number of tokens per training chunk
-    context_length: int = 128
+    context_length: int
 
     #width of the model's internal token vector
-    #means every token becomes a vector with 256 numbers
-    d_model: int = 256
+    #means every token becomes a vector with this many numbers
+    d_model: int
 
     #number of transformer blocks
     #each block contains:
         #attention
         #feed-forward / MLP
-    n_layers: int = 2
+    n_layers: int
 
     #width of one attention head.
     #n_heads is calculated from: n_heads = d_model / head_dim
-    head_dim: int = 64
+    head_dim: int
 
     #controls how wide the MLP part gets inside each transformer block
     #(multi-layer perceptron)
-    mlp_multiplier: float = 4.0
+    mlp_multiplier: float
 
     #path to the token word list the tokenizer is built from
-    tokenpath: str = '/home/sfo/data/models/tokens/text-chunks.jsonl'
+    tokenpath: str
 
     #corpus the training paragraphs are read from
-    textsource: str = '/home/sfo/store/gutenberg/gutenbooks/'
+    textsource: str
 
     #number of chunks trained together in one update
-    batch_size: int = 8
+    batch_size: int
 
     #how large each training update is
-    learning_rate: float = 1e-3
+    learning_rate: float
 
     #get batch, predict next tokens, calculate loss, calculate gradients, update weights, repeat __this-many__ times
-    train_steps: int = 2000
+    train_steps: int
+
+    #number of possible token IDs
+        #this gets set after the tokenizer builds the vocabulary from tokenpath
+        #+ 1 padding token
+        #+ 1 end-of-text token
+        #+ however many token strings are found in tokenpath
+    #the only field not set by main: it is filled in by train() after the tokenizer is built
+    vocab_size: int = 0
 
     @property
     def n_heads(self):
@@ -787,7 +791,7 @@ def generate(prompt, tokenizer, p, cfg, max_new_tokens=100):
     return tokenizer.decode(ids)
 
 
-def train(cfg=None):
+def train(cfg):
     """
     main training loop
         load config
@@ -800,14 +804,9 @@ def train(cfg=None):
         update weights
         repeat
 
-    cfg: a Config with paths/hyperparameters set by the caller (main.py).
-         falls back to the built-in defaults when run standalone.
+    cfg: a fully-populated Config with all paths/hyperparameters set by the
+         caller. main.py is the configuration gateway that builds it.
     """
-
-    #main.py is the configuration gateway and passes a fully-populated Config
-    #the default keeps training.py runnable on its own
-    if cfg is None:
-        cfg = Config()
 
     tokenizer = build_tokenizer_from_jsonl(cfg.tokenpath)
 
@@ -874,4 +873,5 @@ def train(cfg=None):
 
 
 if __name__ == "__main__":
-    train()
+    #training is configured and launched from main.py, the configuration gateway
+    raise SystemExit("run main.py to configure and start training")
