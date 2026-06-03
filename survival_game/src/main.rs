@@ -165,9 +165,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut parents: FxHashMap<String, Vec<String>> = FxHashMap::default();
     let mut allwords: FxHashSet<String> = FxHashSet::default(); // coverage only
 
-    // scratch reused each round
-    let mut chars: Vec<char> = Vec::new();
-    let mut present: FxHashMap<String, i64> = FxHashMap::default();
+    // scratch reused each round: byte offset of each codepoint boundary in the paragraph,
+    // so a token spanning codepoints [i, j) is just &text[boff[i]..boff[j]] (no allocation)
+    let mut boff: Vec<usize> = Vec::new();
 
     for (round, text) in finaltext.iter().enumerate() {
         let round = round as u64;
@@ -191,10 +191,14 @@ fn main() -> Result<(), Box<dyn Error>> {
             *singles.entry(c).or_insert(0) += 1;
         }
 
-        // index the paragraph by codepoint so token slicing matches Python's str slicing
-        chars.clear();
-        chars.extend(text.chars());
-        let n = chars.len();
+        // index the paragraph by codepoint boundary so a token spanning codepoints [i, j) is
+        // &text[boff[i]..boff[j]] — slicing matches Python's str slicing with zero allocation
+        boff.clear();
+        for (b, _) in text.char_indices() {
+            boff.push(b);
+        }
+        boff.push(text.len());
+        let n = boff.len() - 1; // number of codepoints
 
         // A token is "alive coming into this round" iff it exists and was born on an earlier
         // round (born < round). Births happen below, after the descent, so during the descent
@@ -202,18 +206,19 @@ fn main() -> Result<(), Box<dyn Error>> {
         // check is what stops a parent (re)born this round from spawning a child this round.
 
         // --- descend the living tree against the text ---
-        present.clear();
-        let mut current: FxHashMap<String, FxHashSet<usize>> = FxHashMap::default();
+        // `current`/`nxt`/`present` are keyed by &str slices borrowed straight from `text`, so
+        // no String is allocated per occurrence; we only allocate when a token is actually born.
+        let mut present: FxHashMap<&str, i64> = FxHashMap::default();
+        let mut current: FxHashMap<&str, FxHashSet<usize>> = FxHashMap::default();
         for i in 0..n.saturating_sub(1) {
-            let bigram: String = chars[i..i + 2].iter().collect();
-            current.entry(bigram).or_default().insert(i);
+            current.entry(&text[boff[i]..boff[i + 2]]).or_default().insert(i);
         }
 
         let mut level = 2usize;
         while !current.is_empty() {
-            let mut nxt: FxHashMap<String, FxHashSet<usize>> = FxHashMap::default();
-            for (token, positions) in current.iter() {
-                present.insert(token.clone(), positions.len() as i64);
+            let mut nxt: FxHashMap<&str, FxHashSet<usize>> = FxHashMap::default();
+            for (&token, positions) in current.iter() {
+                present.insert(token, positions.len() as i64);
 
                 // only living branches grow; a token that wasn't alive coming in is left as a
                 // tip this round (its own birth/scoring still happens below)
@@ -227,12 +232,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                 // dedupes an extension reachable from both its prefix and its suffix parent.
                 for &i in positions.iter() {
                     if i + level < n {
-                        let ext: String = chars[i..i + level + 1].iter().collect();
-                        nxt.entry(ext).or_default().insert(i);
+                        nxt.entry(&text[boff[i]..boff[i + level + 1]]).or_default().insert(i);
                     }
                     if i >= 1 {
-                        let ext: String = chars[i - 1..i + level].iter().collect();
-                        nxt.entry(ext).or_default().insert(i - 1);
+                        nxt.entry(&text[boff[i - 1]..boff[i + level]]).or_default().insert(i - 1);
                     }
                 }
             }
@@ -241,7 +244,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
 
         // --- births + raw counts ---
-        for (token, &occ) in present.iter() {
+        for (&token, &occ) in present.iter() {
             if let Some(t) = tokens.get_mut(token) {
                 // already living — accrue raw occurrences (score handled below)
                 t.count += occ;
@@ -271,21 +274,21 @@ fn main() -> Result<(), Box<dyn Error>> {
 
             // born as a fresh leaf; the survival game below gives it its first +1
             tokens.insert(
-                token.clone(),
+                token.to_string(),
                 Tok { score: DEATHFLOOR, misses: 0, count: occ, born: round },
             );
-            leaves.insert(token.clone());
+            leaves.insert(token.to_string());
             for p in &livingparents {
-                children.entry(p.clone()).or_default().insert(token.clone());
+                children.entry(p.clone()).or_default().insert(token.to_string());
                 leaves.remove(p); // parent now has a child -> frozen, off the frontier
             }
-            parents.insert(token.clone(), livingparents);
+            parents.insert(token.to_string(), livingparents);
         }
 
         // --- the survival game — only the frontier leaves play it ---
         let leaf_snapshot: Vec<String> = leaves.iter().cloned().collect();
         for token in leaf_snapshot {
-            if present.contains_key(&token) {
+            if present.contains_key(token.as_str()) {
                 if let Some(t) = tokens.get_mut(&token) {
                     t.score += 1;
                     t.misses = 0; // reappeared: reset the grace counter
