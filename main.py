@@ -12,9 +12,9 @@ survivalrounds = 50
 textsource = '/home/sfo/store/gutenberg/gutenbooks/'
 
 tokenoutput = '/home/sfo/data/models/tokens/text-chunks.jsonl'
-#tokenoutput = False
+tokenoutput = False
 
-#tokeninput = '/home/sfo/data/models/tokens/text-chunks.jsonl'
+tokeninput = '/home/sfo/data/models/tokens/text-chunks.jsonl'
 
 coveragetest = True
 #coveragetest = False
