@@ -7,7 +7,7 @@ from training import Config, train
 #how many consecutive rounds a leaf may sit at score 0 (absent) before it dies. a leaf
 #gains +1 when it appears and loses 1 when absent; once its score hits 0, this is the
 #grace period of further absences it gets before being removed.
-survivalrounds = 50
+survivalrounds = 1
 
 textsource = '/home/sfo/store/gutenberg/gutenbooks/'
 
