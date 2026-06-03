@@ -169,22 +169,24 @@ def build_tokenizer_from_jsonl(path):
         "<EOS>": 1,
     }
 
+    #word_survival writes one surviving token per line, each line a JSON-encoded
+    #string (serde_json::to_string), e.g. "ing" — not an object with a 'text' field
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
-            row = json.loads(line)
+            line = line.strip()
 
-            if "text" not in row:
-                raise ValueError("Each JSONL row must contain a 'text' field.")
-
-            text = row["text"].strip()
-
-            if text == "":
+            if line == "":
                 continue
 
-            #each whitespace-separated item is treated as one token string
-            for token in text.split():
-                if token not in token_to_id:
-                    token_to_id[token] = len(token_to_id)
+            #each line decodes to exactly one token string
+            #don't split on whitespace: a token may itself be punctuation/whitespace
+            token = json.loads(line)
+
+            if token == "":
+                continue
+
+            if token not in token_to_id:
+                token_to_id[token] = len(token_to_id)
 
     #reverse lookup for decode()
     id_to_token = {
