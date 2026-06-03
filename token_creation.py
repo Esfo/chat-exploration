@@ -12,8 +12,6 @@ def create_tokens(paragraphs, output_file, survival_rounds=50, token_word_covera
     Writes the jsonl to output_file (full path, name designated by the caller)
     and returns its Path."""
     output_file = Path(output_file)
-    datafolder = RUST_PROJECT / 'data'
-    datafolder.mkdir(exist_ok=True)
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
     spaces = list(string.whitespace)
@@ -29,20 +27,14 @@ def create_tokens(paragraphs, output_file, survival_rounds=50, token_word_covera
         'endpunctuation': endpunctuation,
     }
 
-    configpath = datafolder / 'config.json'
-
     nt = time()
     print('token survival start')
 
-    with open(configpath, 'w', encoding='utf-8') as f:
-        json.dump(config, f, ensure_ascii=False)
-
-    # The finaltext input is huge and is only scratch input for the rust binary.
-    # Stream it in over stdin ("-") so it is never written to disk at all; the
-    # only output is the designated word list at output_file.
+    # Nothing is written to disk except the final output: the config is passed
+    # inline as a JSON arg and the (huge) finaltext is streamed in over stdin.
     proc = subprocess.Popen(
         ['cargo', 'run', '--release', '--',
-         '-', str(configpath), str(output_file),
+         '-', json.dumps(config, ensure_ascii=False), str(output_file),
          '1' if token_word_coverage_test else '0'],
         cwd=RUST_PROJECT, stdin=subprocess.PIPE, text=True, encoding='utf-8',
     )

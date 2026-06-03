@@ -160,7 +160,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let finaltextpath = PathBuf::from(&args[1]);
-    let configpath = PathBuf::from(&args[2]);
+    let configarg = &args[2];
     let outputfile = PathBuf::from(&args[3]);
     //optional 4th arg toggles the word-completion (coverage) test; defaults on
     let run_coverage = args.get(4).map(|s| s != "0").unwrap_or(true);
@@ -168,7 +168,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         create_dir_all(parent)?;
     }
 
-    let config: Config = serde_json::from_reader(File::open(configpath)?)?;
+    // The config is tiny; accept it as an inline JSON string so nothing needs
+    // to be written to disk. (A leading '{' marks inline JSON; otherwise it is
+    // treated as a path for backward compatibility.)
+    let config: Config = if configarg.trim_start().starts_with('{') {
+        serde_json::from_str(configarg)?
+    } else {
+        serde_json::from_reader(File::open(configarg)?)?
+    };
     let survivalrounds = config.survivalrounds;
 
     let splits: Vec<Vec<u8>> = config
