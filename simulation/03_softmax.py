@@ -40,10 +40,7 @@ has an especially clean form when combined with cross-entropy (see stage 7).
 """
 
 import numpy as np
-import matplotlib
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import os
 
 def softmax(x):
     x = x - np.max(x, axis=-1, keepdims=True)   # stability shift
@@ -93,6 +90,4 @@ axes[2].set_title("softmax squashes scores\ninto (0,1); T changes sharpness")
 axes[2].set_xlabel("logit difference"); axes[2].set_ylabel("P(class 0)"); axes[2].legend()
 
 plt.tight_layout()
-out = os.path.join(os.path.dirname(__file__), "visualizations", "03_softmax.png")
-plt.savefig(out, dpi=110)
-print(f"\nVisualization saved -> {out}")
+plt.show()

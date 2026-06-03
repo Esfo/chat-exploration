@@ -44,10 +44,7 @@ and mlp_hidden are cached for backprop (the ReLU mask needs pre_activation).
 
 import numpy as np
 import math
-import matplotlib
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import os
 
 batch, seq, d_model = 1, 5, 8
 d_ff = 32
@@ -101,6 +98,4 @@ axes[2].set_title("expand -> non-linear -> shrink")
 axes[2].set_ylabel("vector width")
 
 plt.tight_layout()
-out = os.path.join(os.path.dirname(__file__), "visualizations", "05_mlp_feedforward.png")
-plt.savefig(out, dpi=110)
-print(f"\nVisualization saved -> {out}")
+plt.show()

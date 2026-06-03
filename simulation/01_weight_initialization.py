@@ -44,10 +44,7 @@ pass) and every gradient writes a correction back into it (the optimizer).
 
 import numpy as np
 import math
-import matplotlib
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import os
 
 # --- toy config (small so we can actually look at the numbers) ---
 vocab_size = 50
@@ -115,6 +112,4 @@ axes[2].set_title("Init std = 1/sqrt(fan_in)\nwider layers start smaller")
 axes[2].set_xlabel("fan_in (input width)"); axes[2].set_ylabel("std dev of weights")
 
 plt.tight_layout()
-out = os.path.join(os.path.dirname(__file__), "visualizations", "01_weight_initialization.png")
-plt.savefig(out, dpi=110)
-print(f"\nVisualization saved -> {out}")
+plt.show()

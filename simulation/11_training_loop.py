@@ -34,10 +34,7 @@ synthetic repeating sequence so the learning dynamics are visible in seconds.
 
 import numpy as np
 import math
-import matplotlib
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import os
 
 rng = np.random.default_rng(0)
 vocab, d_model, d_ff, seq, batch = 6, 16, 64, 8, 16
@@ -161,6 +158,4 @@ axes[1].set_xticks(range(vocab))
 plt.colorbar(im, ax=axes[1], fraction=0.046)
 
 plt.tight_layout()
-out=os.path.join(os.path.dirname(__file__),"visualizations","11_training_loop.png")
-plt.savefig(out,dpi=110)
-print(f"\nVisualization saved -> {out}")
+plt.show()

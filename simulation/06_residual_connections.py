@@ -37,10 +37,7 @@ path, and the two are added (you'll see `dh = dh + ...` in stage 8).
 """
 
 import numpy as np
-import matplotlib
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import os
 
 rng = np.random.default_rng(0)
 d = 32
@@ -96,6 +93,4 @@ axes[1].set_title("Forward: block learns only a\nsmall correction to the stream"
 axes[1].set_ylabel("vector norm")
 
 plt.tight_layout()
-out = os.path.join(os.path.dirname(__file__), "visualizations", "06_residual_connections.png")
-plt.savefig(out, dpi=110)
-print(f"\nVisualization saved -> {out}")
+plt.show()

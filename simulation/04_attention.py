@@ -48,10 +48,7 @@ reuse these exact intermediate values instead of recomputing them.
 
 import numpy as np
 import math
-import matplotlib
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import os
 
 def softmax(x):
     x = x - np.max(x, axis=-1, keepdims=True)
@@ -122,6 +119,4 @@ axes[2].set_xlabel("key token (j)"); axes[2].set_ylabel("query token (i)")
 plt.colorbar(im2, ax=axes[2], fraction=0.046)
 
 plt.tight_layout()
-out_path = os.path.join(os.path.dirname(__file__), "visualizations", "04_attention.png")
-plt.savefig(out_path, dpi=110)
-print(f"\nVisualization saved -> {out_path}")
+plt.show()

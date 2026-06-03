@@ -51,10 +51,7 @@ Loop: forward -> loss -> backward -> adamw_update -> repeat (the training loop).
 """
 
 import numpy as np
-import matplotlib
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import os
 
 # A 2-D loss surface so we can SEE optimizers move: a stretched bowl (ill-conditioned).
 def loss(w):      # w = [x, y]
@@ -126,6 +123,4 @@ axes[1].set_title("Loss vs step\n(this is the curve printed during training)")
 axes[1].set_xlabel("step"); axes[1].set_ylabel("loss (log)"); axes[1].legend()
 
 plt.tight_layout()
-out = os.path.join(os.path.dirname(__file__), "visualizations", "10_gradient_descent_adamw.png")
-plt.savefig(out, dpi=110)
-print(f"\nVisualization saved -> {out}")
+plt.show()

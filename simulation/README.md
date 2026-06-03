@@ -3,8 +3,8 @@
 Standalone, runnable breakdowns of every relevant training stage in
 [`../training.py`](../training.py). Each script isolates one stage, walks through
 its math, prints the **shapes** of every intermediate (where each came from, why
-it has that shape, and where it goes next), and saves a relevant visualization to
-`visualizations/`.
+it has that shape, and where it goes next), and pops up a relevant plot with
+`plt.show()`.
 
 Tokenization and text-processing are intentionally **excluded** (as requested) —
 these focus purely on the neural-network learning math.
@@ -32,13 +32,12 @@ correct against finite differences.
 
 ## Running
 
-Each file is self-contained (only `numpy` + `matplotlib`):
+Each file is self-contained (only `numpy` + `matplotlib`). They're written for an
+interactive session (e.g. Jupyter QtConsole), where the figures render inline:
 
-```bash
-pip install numpy matplotlib
-python3 08_backpropagation.py        # run one stage
-python3 run_all.py                   # run every stage in order
+```python
+%run 08_backpropagation.py        # run one stage, plot shows inline
 ```
 
-Every script prints an annotated trace to stdout and writes a `.png` into
-`visualizations/`.
+Every script prints an annotated trace and calls `plt.show()` to display its
+figure — nothing is written to disk.

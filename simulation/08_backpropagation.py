@@ -43,10 +43,7 @@ gradient check (finite differences). If analytic ≈ numerical, the math is righ
 
 import numpy as np
 import math
-import matplotlib
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import os
 
 # ---------- tiny model ----------
 rng = np.random.default_rng(1)
@@ -213,6 +210,4 @@ axes[2].set_xlabel("vocab"); axes[2].set_ylabel("d_model")
 plt.colorbar(im, ax=axes[2], fraction=0.046)
 
 plt.tight_layout()
-out = os.path.join(os.path.dirname(__file__), "visualizations", "08_backpropagation.png")
-plt.savefig(out, dpi=110)
-print(f"\nVisualization saved -> {out}")
+plt.show()

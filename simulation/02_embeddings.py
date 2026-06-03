@@ -44,10 +44,7 @@ into the exact rows of tok_emb/pos_emb that were looked up (see stage 8).
 """
 
 import numpy as np
-import matplotlib
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import os
 
 vocab_size = 12
 d_model = 8
@@ -104,6 +101,4 @@ axes[2].set_yticklabels([f"id{x[0,i]}@p{i}" for i in range(seq)])
 axes[2].set_xlabel("embedding dim"); plt.colorbar(im2, ax=axes[2], fraction=0.046)
 
 plt.tight_layout()
-out = os.path.join(os.path.dirname(__file__), "visualizations", "02_embeddings.png")
-plt.savefig(out, dpi=110)
-print(f"\nVisualization saved -> {out}")
+plt.show()

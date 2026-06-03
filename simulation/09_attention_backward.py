@@ -53,10 +53,7 @@ SHAPES
 
 import numpy as np
 import math
-import matplotlib
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import os
 
 rng = np.random.default_rng(2)
 batch, seq, d_model = 1, 5, 8
@@ -150,6 +147,4 @@ axes[2].set_title("dscores after softmax-backward\n(rebalanced by -sum(g*p))")
 axes[2].set_xlabel("key"); axes[2].set_ylabel("query"); plt.colorbar(im2, ax=axes[2], fraction=0.046)
 
 plt.tight_layout()
-outp = os.path.join(os.path.dirname(__file__), "visualizations", "09_attention_backward.png")
-plt.savefig(outp, dpi=110)
-print(f"\nVisualization saved -> {outp}")
+plt.show()

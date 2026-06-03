@@ -47,10 +47,7 @@ it back through the output head and every transformer block.
 """
 
 import numpy as np
-import matplotlib
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import os
 
 def softmax(x):
     x = x - np.max(x, axis=-1, keepdims=True)
@@ -115,6 +112,4 @@ axes[2].set_title("loss = -log(p_correct)\nconfident & right -> ~0")
 axes[2].set_xlabel("probability on correct token"); axes[2].set_ylabel("loss"); axes[2].legend()
 
 plt.tight_layout()
-out = os.path.join(os.path.dirname(__file__), "visualizations", "07_cross_entropy_loss.png")
-plt.savefig(out, dpi=110)
-print(f"\nVisualization saved -> {out}")
+plt.show()
