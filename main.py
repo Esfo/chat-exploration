@@ -40,11 +40,6 @@ head_dim = 64
 #controls how wide the MLP part gets inside each transformer block
 mlp_multiplier = 4.0
 
-#cache the tokenised corpus to this .pt file so only the first run pays the
-#tokenising cost; later runs load it instantly. set to False to disable caching.
-token_cache = '/home/sfo/data/models/tokens/corpus.pt'
-#token_cache = False
-
 #use rotary position encoding (RoPE) instead of a learned position-embedding
 #table. RoPE bakes position into attention by rotating queries/keys, generalises
 #better, and needs no position table. requires head_dim to be even.
@@ -156,7 +151,6 @@ if training:
         #paths come from this gateway, not from training.py
         tokenpath=str(tokensfile),
         textsource=textsource,
-        token_cache=str(token_cache) if token_cache else "",
         batch_size=batch_size,
         learning_rate=learning_rate,
         log_every=log_every,
