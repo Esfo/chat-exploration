@@ -12,13 +12,3 @@ proper sampling controls
 weight tying
 KV cache for inference
 optimized attention
-
-~
-training should reward correct tokens as long as they represent correct text, i don't want it only rewarding the largest possible token, but i do want it rewarding the largest token MORE
-
-should i pre-factor in ALL of these tokens, as a non-earned reward across multiple dimensions, as long as they fit the right spot?
-that might be interesting, just stratify the rewards in order of their length
-
-~
-also i have a nvidia gpu and cuda should work, can you pipe it into that?
-should any of this be multiprocessed in any way to speed it up?
