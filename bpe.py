@@ -19,6 +19,7 @@ import heapq
 import json
 import os
 import re
+import time
 
 from read_paragraphs import read_paragraphs
 
@@ -30,6 +31,9 @@ SPACE = "▁"  # ▁
 PAD_TOKEN = "<PAD>"
 EOS_TOKEN = "<EOS>"
 UNK_TOKEN = "<UNK>"
+
+#precompiled once: a word is the SPACE marker plus the run of non-marker chars
+_WORD_RE = re.compile(SPACE + "[^" + SPACE + "]+")
 
 
 def _pretokenize(text):
@@ -47,7 +51,7 @@ def _pretokenize(text):
     #every word boundary becomes a SPACE marker, then split on it (keeping it
     #attached to the front of each word)
     marked = SPACE + text.replace(" ", SPACE)
-    return re.findall(SPACE + "[^" + SPACE + "]+", marked)
+    return _WORD_RE.findall(marked)
 
 
 class BPETokenizer:
@@ -149,7 +153,7 @@ class BPETokenizer:
         return cls(id_to_token=data["id_to_token"], merges=data["merges"])
 
 
-def train_from_paragraphs(paragraphs, vocab_size):
+def train_from_paragraphs(paragraphs, vocab_size, min_frequency=2):
     """
     learn a BPE vocabulary of (about) vocab_size tokens from an iterable of
     paragraph strings.
@@ -157,9 +161,15 @@ def train_from_paragraphs(paragraphs, vocab_size):
     works on unique word *types* weighted by frequency (not the raw token
     stream), and updates pair statistics incrementally with a lazy heap, so it
     scales to large corpora without rescanning everything each merge.
+
+    min_frequency drops word types rarer than this from the merge search. the
+    base alphabet is still taken from every word, so coverage is unaffected -
+    this only skips the long tail of once-seen words that barely influence the
+    merges but dominate the type count, which is a big speedup.
     """
 
     #1) count how often each pre-tokenised word appears
+    t0 = time.time()
     word_counts = {}
     for paragraph in paragraphs:
         for word in _pretokenize(paragraph):
@@ -168,14 +178,31 @@ def train_from_paragraphs(paragraphs, vocab_size):
     if not word_counts:
         raise ValueError("no words found to train a tokenizer on; check textsource")
 
-    #2) start every word as a list of single characters; collect the base alphabet
+    #the base alphabet comes from ALL words so every character stays coverable
+    alphabet = set()
+    for word in word_counts:
+        alphabet.update(word)
+
+    print(
+        f"  counted {len(word_counts)} word types in {time.time() - t0:.1f}s",
+        flush=True,
+    )
+
+    #2) start every (frequent-enough) word as a list of single characters
+    t1 = time.time()
     word_syms = []
     word_freq = []
-    alphabet = set()
     for word, count in word_counts.items():
+        if count < min_frequency:
+            continue
         word_syms.append(list(word))
         word_freq.append(count)
-        alphabet.update(word)
+
+    print(
+        f"  merging over {len(word_syms)} word types "
+        f"(min_frequency={min_frequency})",
+        flush=True,
+    )
 
     #3) initial adjacent-pair statistics
     pair_counts = {}
@@ -195,6 +222,7 @@ def train_from_paragraphs(paragraphs, vocab_size):
     n_specials = 3  # PAD, EOS, UNK
     num_merges = max(0, vocab_size - n_specials - len(alphabet))
 
+    t2 = time.time()
     merges = []
     while len(merges) < num_merges:
         #pop the most frequent still-valid pair
@@ -216,10 +244,14 @@ def train_from_paragraphs(paragraphs, vocab_size):
             syms = word_syms[wi]
             freq = word_freq[wi]
 
-            #remove this word's current pair contributions
+            #remove this word's current pair contributions. discarding the word
+            #from each pair's membership keeps those sets from filling up with
+            #stale entries, so future merges only visit words that really contain
+            #the pair (the main speedup).
             for a, b in zip(syms, syms[1:]):
                 pair = (a, b)
                 pair_counts[pair] -= freq
+                pair_words[pair].discard(wi)
                 touched.add(pair)
 
             #merge adjacent occurrences of best
@@ -253,6 +285,11 @@ def train_from_paragraphs(paragraphs, vocab_size):
             if count > 0:
                 heapq.heappush(heap, (-count, pair))
 
+    print(
+        f"  learned {len(merges)} merges in {time.time() - t2:.1f}s",
+        flush=True,
+    )
+
     #5) assemble the final id<->token tables
     id_to_token = [PAD_TOKEN, EOS_TOKEN, UNK_TOKEN]
     seen = set(id_to_token)
@@ -269,6 +306,6 @@ def train_from_paragraphs(paragraphs, vocab_size):
     return BPETokenizer(id_to_token=id_to_token, merges=merges)
 
 
-def train(textsource, vocab_size):
+def train(textsource, vocab_size, min_frequency=2):
     """learn a tokenizer straight from the corpus on disk."""
-    return train_from_paragraphs(read_paragraphs(textsource), vocab_size)
+    return train_from_paragraphs(read_paragraphs(textsource), vocab_size, min_frequency)

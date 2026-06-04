@@ -12,6 +12,12 @@ textsource = '/home/sfo/store/gutenberg/gutenbooks/'
 #~8k is a sensible middle for a corpus this size.
 vocab_size = 8000
 
+#skip word types rarer than this when learning merges. raising it speeds up
+#tokenizer training (drops the long tail of once-seen words) with little quality
+#cost; coverage is unaffected since every character is still kept. lower to 1 to
+#train on every word.
+tokenizer_min_frequency = 2
+
 #train a fresh tokenizer and save it to this path. set to False to skip training
 #and just load an existing one from tokeninput below.
 tokenoutput = '/home/sfo/data/models/tokens/bpe.json'
@@ -149,7 +155,7 @@ val_batches = 20
 def run():
     if tokenoutput:
         print(f'training BPE tokenizer (vocab_size={vocab_size})...')
-        tokenizer = train_tokenizer(textsource, vocab_size)
+        tokenizer = train_tokenizer(textsource, vocab_size, tokenizer_min_frequency)
         tokenizer.save(tokenoutput)
         tokensfile = tokenoutput
         print(f'tokenizer ({tokenizer.vocab_size} tokens) written to {tokensfile}')
