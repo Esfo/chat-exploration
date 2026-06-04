@@ -40,11 +40,11 @@ head_dim = 64
 #controls how wide the MLP part gets inside each transformer block
 mlp_multiplier = 4.0
 
-#save the encoded token IDs (the integer-ID tensor, NOT the vocabulary jsonl)
-#to this .pt file so only the first run pays the tokenising cost; later runs
-#load it instantly. set to False to disable and re-tokenise every run.
-encoded_tokens_cache = '/home/sfo/data/models/tokens/encoded-tokens.pt'
-#encoded_tokens_cache = False
+#save the encoded corpus (the whole corpus as one integer token-ID tensor, NOT
+#the vocabulary jsonl) to this .pt file so only the first run pays the tokenising
+#cost; later runs load it instantly. set to False to re-tokenise every run.
+corpus_cache = '/home/sfo/data/models/tokens/corpus.pt'
+#corpus_cache = False
 
 #use rotary position encoding (RoPE) instead of a learned position-embedding
 #table. RoPE bakes position into attention by rotating queries/keys, generalises
@@ -138,14 +138,24 @@ val_batches = 20
 
 #=== pipeline ===
 
-if tokenoutput:
-    tokensfile = word_survival(textsource, tokenoutput, survivalrounds, coveragetest)
-    print('tokens written to', tokensfile)
-else:
-    tokensfile = tokeninput
-    print('using existing tokens at', tokensfile)
+#the actual work lives under the __main__ guard below. this matters because the
+#DataLoader's worker processes import this module to get at the code; without
+#the guard, every worker would re-run the whole pipeline (re-tokenising the
+#entire corpus once per worker). with it, workers import the config only and
+#receive the already-encoded data from the parent.
 
-if training:
+def run():
+    if tokenoutput:
+        tokensfile = word_survival(textsource, tokenoutput, survivalrounds, coveragetest)
+        print('tokens written to', tokensfile)
+    else:
+        tokensfile = tokeninput
+        print('using existing tokens at', tokensfile)
+
+    if not training:
+        print('training disabled')
+        return
+
     cfg = Config(
         context_length=context_length,
         d_model=d_model,
@@ -157,7 +167,7 @@ if training:
         #paths come from this gateway, not from training.py
         tokenpath=str(tokensfile),
         textsource=textsource,
-        encoded_tokens_cache=str(encoded_tokens_cache) if encoded_tokens_cache else "",
+        corpus_cache=str(corpus_cache) if corpus_cache else "",
         batch_size=batch_size,
         learning_rate=learning_rate,
         log_every=log_every,
@@ -184,5 +194,7 @@ if training:
         val_batches=val_batches,
     )
     train(cfg)
-else:
-    print('training disabled')
+
+
+if __name__ == "__main__":
+    run()

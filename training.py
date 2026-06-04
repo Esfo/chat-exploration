@@ -136,10 +136,10 @@ class Config:
 
     #=== architecture options ===
 
-    #optional path to save the encoded token IDs (a .pt file holding the integer
-    #token-ID tensor, NOT the vocabulary jsonl). the first run writes it; later
-    #runs load it instantly instead of re-tokenising. "" = off.
-    encoded_tokens_cache: str = ""
+    #optional path to save the encoded corpus (a .pt file holding the corpus as
+    #one integer token-ID tensor, NOT the vocabulary jsonl). the first run writes
+    #it; later runs load it instantly instead of re-tokenising. "" = off.
+    corpus_cache: str = ""
 
     #use rotary position encoding (RoPE) instead of a learned position-embedding
     #table. RoPE rotates the query/key vectors by an amount that depends on each
@@ -345,9 +345,9 @@ def encode_corpus(textsource, tokenizer, cache_path=""):
     it goes so a long tokenise never looks frozen.
     """
 
-    #reuse a previously saved encoding if one exists
+    #reuse a previously saved encoded corpus if one exists
     if cache_path and os.path.exists(cache_path):
-        print(f"loading encoded tokens from {cache_path}", flush=True)
+        print(f"loading encoded corpus from {cache_path}", flush=True)
         return torch.load(cache_path)
 
     print("tokenising corpus (one-time)... ", flush=True)
@@ -374,13 +374,13 @@ def encode_corpus(textsource, tokenizer, cache_path=""):
     tokens = torch.tensor(all_ids, dtype=torch.int32)
     print(f"tokenised {len(tokens)} token IDs in {time.time() - start:.1f}s", flush=True)
 
-    #save the encoded token IDs so the next run skips tokenising entirely
+    #save the encoded corpus so the next run skips tokenising entirely
     if cache_path:
         directory = os.path.dirname(cache_path)
         if directory:
             os.makedirs(directory, exist_ok=True)
         torch.save(tokens, cache_path)
-        print(f"saved encoded tokens to {cache_path}", flush=True)
+        print(f"saved encoded corpus to {cache_path}", flush=True)
 
     return tokens
 
@@ -941,7 +941,7 @@ def train(cfg):
     print(f"\ndevice         = {device} | optimizer = {cfg.optimizer} | amp = {cfg.use_amp}")
 
     #encode the whole corpus once, then split + wrap in DataLoaders
-    tokens = encode_corpus(cfg.textsource, tokenizer, cache_path=cfg.encoded_tokens_cache)
+    tokens = encode_corpus(cfg.textsource, tokenizer, cache_path=cfg.corpus_cache)
     print(f"corpus tokens  = {len(tokens)}", flush=True)
     train_loader, val_loader = make_loaders(tokens, cfg)
 
@@ -974,7 +974,7 @@ def train(cfg):
     #mixed precision: only meaningful on cuda. the GradScaler keeps fp16
     #gradients from underflowing to zero.
     amp_enabled = bool(cfg.use_amp) and device.type == "cuda"
-    scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
+    scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
 
     #wall-clock so the progress log can show how long each step takes
     last_log_time = time.time()
