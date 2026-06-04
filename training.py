@@ -134,6 +134,14 @@ class Config:
     #how many batches to average the validation loss over.
     val_batches: int = 20
 
+    #=== architecture options ===
+
+    #use rotary position encoding (RoPE) instead of a learned position-embedding
+    #table. RoPE rotates the query/key vectors by an amount that depends on each
+    #token's position, so position is baked into attention itself. requires an
+    #even head_dim. when True the learned pos_emb table is unused.
+    use_rope: bool = False
+
     #number of possible token IDs
         #this gets set after the tokenizer builds the vocabulary from tokenpath
         #+ 1 padding token
@@ -393,6 +401,51 @@ def make_loaders(tokens, cfg):
     return train_loader, val_loader
 
 
+def build_rope_cache(seq_len, head_dim, device, base=10000.0):
+    """
+    precompute the cos/sin tables RoPE rotates query/key vectors by.
+
+    returns two (seq_len, head_dim) tensors. each position gets a different set
+    of rotation angles, and the rotation amount grows with position, which is
+    what lets attention sense how far apart two tokens are.
+    """
+
+    #one frequency per pair of dimensions; low dims rotate fast, high dims slow
+    inv_freq = 1.0 / (base ** (torch.arange(0, head_dim, 2, device=device).float() / head_dim))
+    positions = torch.arange(seq_len, device=device).float()
+    #angle for every (position, frequency) pair, then duplicated to cover both
+    #halves of each dimension pair
+    freqs = torch.outer(positions, inv_freq)
+    emb = torch.cat([freqs, freqs], dim=-1)
+    return emb.cos(), emb.sin()
+
+
+def rotate_half(x):
+    """
+    rotate the two halves of the last dimension: (a, b) -> (-b, a). this is the
+    paired-dimension trick that makes the RoPE rotation a single elementwise op.
+    """
+
+    half = x.shape[-1] // 2
+    x1, x2 = x[..., :half], x[..., half:]
+    return torch.cat([-x2, x1], dim=-1)
+
+
+def apply_rope(q, k, cos, sin):
+    """
+    apply the rotary position encoding to queries and keys.
+
+    q, k:    (batch, n_heads, seq_len, head_dim)
+    cos/sin: (seq_len, head_dim) -> broadcast over batch and heads
+    """
+
+    cos = cos[None, None, :, :]
+    sin = sin[None, None, :, :]
+    q = q * cos + rotate_half(q) * sin
+    k = k * cos + rotate_half(k) * sin
+    return q, k
+
+
 class Block(nn.Module):
     """
     one pre-norm transformer block: attention then MLP, each wrapped in a
@@ -414,7 +467,7 @@ class Block(nn.Module):
         self.fc1 = nn.Linear(cfg.d_model, cfg.d_ff)
         self.fc2 = nn.Linear(cfg.d_ff, cfg.d_model)
 
-    def attention(self, x):
+    def attention(self, x, rope):
         batch_size, seq_len, d_model = x.shape
 
         #project to q, k, v and split into heads:
@@ -423,6 +476,12 @@ class Block(nn.Module):
         qkv = qkv.reshape(batch_size, seq_len, 3, self.n_heads, self.head_dim)
         qkv = qkv.permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
+
+        #rotary position encoding: rotate q/k by their position before attention.
+        #rope is (cos, sin) when enabled, or None when using learned pos_emb.
+        if rope is not None:
+            cos, sin = rope
+            q, k = apply_rope(q, k, cos, sin)
 
         #optimised attention: this calls PyTorch's fused (flash) attention
         #kernel on the GPU and applies the causal mask internally, so a token
@@ -433,9 +492,9 @@ class Block(nn.Module):
         out = out.transpose(1, 2).reshape(batch_size, seq_len, d_model)
         return self.proj(out)
 
-    def forward(self, x):
+    def forward(self, x, rope):
         #residual + attention over a normalised input
-        x = x + self.attention(self.ln1(x))
+        x = x + self.attention(self.ln1(x), rope)
         #residual + MLP (GELU is the standard transformer activation) over a normalised input
         x = x + self.fc2(F.gelu(self.fc1(self.ln2(x))))
         return x
@@ -443,8 +502,13 @@ class Block(nn.Module):
 
 class GPT(nn.Module):
     """
-    the whole model: token + position embeddings, a stack of transformer blocks,
-    a final norm, and an output head that scores every possible next token.
+    the whole model: token embeddings (+ position info), a stack of transformer
+    blocks, a final norm, and an output head that scores every possible next
+    token.
+
+    position is handled one of two ways depending on cfg.use_rope:
+      - RoPE: queries/keys are rotated by position inside attention (no table)
+      - learned: a position-embedding table is added to the token vectors
 
     the output head shares its weights with the token embedding (weight tying),
     a standard trick that cuts parameters and tends to help small models.
@@ -453,9 +517,21 @@ class GPT(nn.Module):
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
+        self.use_rope = cfg.use_rope
 
         self.tok_emb = nn.Embedding(cfg.vocab_size, cfg.d_model)
-        self.pos_emb = nn.Embedding(cfg.context_length, cfg.d_model)
+
+        if self.use_rope:
+            if cfg.head_dim % 2 != 0:
+                raise ValueError(f"use_rope needs an even head_dim, got {cfg.head_dim}")
+            #precompute the rotation tables once and ship them with the model
+            #(non-persistent: rebuilt on load, never saved into the checkpoint).
+            cos, sin = build_rope_cache(cfg.context_length, cfg.head_dim, device="cpu")
+            self.register_buffer("rope_cos", cos, persistent=False)
+            self.register_buffer("rope_sin", sin, persistent=False)
+        else:
+            self.pos_emb = nn.Embedding(cfg.context_length, cfg.d_model)
+
         self.blocks = nn.ModuleList(Block(cfg) for _ in range(cfg.n_layers))
         self.ln_f = nn.LayerNorm(cfg.d_model)
         self.head = nn.Linear(cfg.d_model, cfg.vocab_size, bias=False)
@@ -477,12 +553,23 @@ class GPT(nn.Module):
     def forward(self, x, targets=None):
         batch_size, seq_len = x.shape
 
-        positions = torch.arange(seq_len, device=x.device)
-        #hidden state starts as token meaning + position meaning
-        h = self.tok_emb(x) + self.pos_emb(positions)[None, :, :]
+        if self.use_rope:
+            #position lives in the rotation applied inside attention; the hidden
+            #state starts as token meaning only. slice the cached tables to this
+            #sequence length (and follow the model's device/dtype).
+            h = self.tok_emb(x)
+            rope = (
+                self.rope_cos[:seq_len].to(h.dtype),
+                self.rope_sin[:seq_len].to(h.dtype),
+            )
+        else:
+            positions = torch.arange(seq_len, device=x.device)
+            #hidden state starts as token meaning + position meaning
+            h = self.tok_emb(x) + self.pos_emb(positions)[None, :, :]
+            rope = None
 
         for block in self.blocks:
-            h = block(h)
+            h = block(h, rope)
 
         h = self.ln_f(h)
         logits = self.head(h)
@@ -654,6 +741,7 @@ _SAVED_CONFIG_FIELDS = (
     "batch_size",
     "learning_rate",
     "vocab_size",
+    "use_rope",
 )
 
 
@@ -708,6 +796,8 @@ def load_model(path, device="cpu"):
         batch_size=config_meta["batch_size"],
         learning_rate=config_meta["learning_rate"],
         log_every=1,
+        #default False keeps models saved before RoPE existed loadable
+        use_rope=config_meta.get("use_rope", False),
         vocab_size=config_meta["vocab_size"],
     )
 
@@ -757,6 +847,7 @@ def train(cfg):
     print(f"d_ff           = {cfg.d_ff}")
     print(f"mlp_size       = {cfg.d_model} × {cfg.d_ff}")
     print(f"total_blocks   = {cfg.n_layers}")
+    print(f"position_enc   = {'RoPE' if cfg.use_rope else 'learned'}")
     print(f"\ndevice         = {device} | optimizer = {cfg.optimizer} | amp = {cfg.use_amp}")
 
     #encode the whole corpus once, then split + wrap in DataLoaders
