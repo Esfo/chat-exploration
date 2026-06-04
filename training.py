@@ -204,6 +204,12 @@ class VocabTokenizer:
     #stop codon
     eos_id: int = 1
 
+    #explicit word-boundary token. the corpus tokens are subword pieces with no
+    #built-in spacing, so we emit this between tokens that were separated by
+    #whitespace in the source. without it, word boundaries are lost and decode
+    #can't tell "be"+"tte"+"r" (one word) from "the"+"better" (two words).
+    space_id: int = 2
+
     def __post_init__(self):
         #lookup structures for fast longest-match encoding (built once):
         #  a set for O(1) "is this substring a token?" tests, and the distinct
@@ -220,6 +226,9 @@ class VocabTokenizer:
         the same longest-match result as scanning the whole vocabulary, but
         costs O(number of distinct lengths) per position instead of O(vocab),
         which is the difference between seconds and many minutes on a big corpus.
+
+        whitespace between tokens is recorded as a single space_id, so decode can
+        rebuild word boundaries instead of guessing.
         """
 
         #list of integer IDs produced by the tokenizer
@@ -229,9 +238,13 @@ class VocabTokenizer:
         i = 0
         n = len(text)
 
+        #whether we've passed whitespace since the last real token was emitted
+        pending_space = False
+
         while i < n:
-            #skip whitespace between token strings
+            #whitespace marks a word boundary; remember it but don't emit yet
             if text[i].isspace():
+                pending_space = True
                 i += 1
                 continue
 
@@ -248,6 +261,12 @@ class VocabTokenizer:
             if match is None:
                 raise ValueError(f"unknown token near: {text[i:i + 30]!r}")
 
+            #emit one space token for the whitespace run that preceded this token
+            #(but not at the very start, so text doesn't begin with a space)
+            if pending_space and token_ids:
+                token_ids.append(self.space_id)
+            pending_space = False
+
             #append this token's fixed vocabulary ID
             token_ids.append(self.token_to_id[match])
 
@@ -261,18 +280,29 @@ class VocabTokenizer:
     def decode(self, token_ids):
         """
         convert token IDs back into text.
+
+        within-word pieces are concatenated directly; the space_id is rendered as
+        a real space, so 'be'+'tte'+'r' -> 'better' and 'the'+SP+'cat' -> 'the cat'.
         """
 
-        tokens = []
+        out = []
 
         for token_id in token_ids:
-            #ignore special tokens like pad_id=0 and eos_id=1
+            token_id = int(token_id)
+
+            #drop padding / end-of-text markers entirely
             if token_id == self.pad_id or token_id == self.eos_id:
                 continue
 
-            tokens.append(self.id_to_token[int(token_id)])
+            #the word-boundary token becomes an actual space
+            if token_id == self.space_id:
+                out.append(" ")
+                continue
 
-        return " ".join(tokens)
+            out.append(self.id_to_token[token_id])
+
+        #pieces already carry their own spacing via space_id, so join with nothing
+        return "".join(out)
 
 
 def build_tokenizer_from_jsonl(path):
@@ -280,10 +310,11 @@ def build_tokenizer_from_jsonl(path):
     build tokenizer vocabulary from a JSONL file.
     """
 
-    #start with special token IDs
+    #start with special token IDs (must match VocabTokenizer's pad/eos/space ids)
     token_to_id = {
         "<PAD>": 0,
         "<EOS>": 1,
+        "<SP>": 2,
     }
 
     #word_survival writes one surviving token per line, each line a JSON-encoded
@@ -316,7 +347,7 @@ def build_tokenizer_from_jsonl(path):
         [
             token
             for token in token_to_id
-            if token not in ("<PAD>", "<EOS>")
+            if token not in ("<PAD>", "<EOS>", "<SP>")
         ],
         key=len,
         reverse=True,
