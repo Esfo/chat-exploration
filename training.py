@@ -46,13 +46,12 @@ class Config:
     #how large each training update is
     learning_rate: float
 
-    #number of training steps to run
-    train_steps: int
-
     #how often (in steps) to print the training loss to stdout
     log_every: int
 
-    #where to write the trained model after training finishes.
+    #where to write the trained model.
+    #the model is saved here on the periodic checkpoint, when the loss target is
+    #reached, and if training is interrupted (ctrl-c).
     #set to a path like 'model.npz' to save; leave as "" / False to skip saving.
     model_output: str = ""
 
@@ -60,10 +59,17 @@ class Config:
     #leave as "" / False to start from fresh random weights.
     resume_from: str = ""
 
-    #optional early-stopping target. once the training loss drops to or below
-    #this value, training stops before reaching train_steps.
-    #leave as 0 / None to disable and always run the full train_steps.
-    target_loss: float = 0.0
+    #early-stopping target. training runs until the average loss over the last
+    #target_window steps drops to or below this value (there is no fixed step
+    #count). set target_loss to 0 / False to train forever until interrupted.
+    target_loss: float = 0.1
+
+    #how many recent steps the average is taken over when checking target_loss.
+    target_window: int = 100
+
+    #save a checkpoint to model_output every this many steps, so progress
+    #survives a crash or interruption even between the start and the target.
+    checkpoint_every: int = 200
 
     #number of possible token IDs
         #this gets set after the tokenizer builds the vocabulary from tokenpath
@@ -845,7 +851,6 @@ def load_model(path):
         textsource=config_meta["textsource"],
         batch_size=config_meta["batch_size"],
         learning_rate=config_meta["learning_rate"],
-        train_steps=0,
         log_every=1,
         vocab_size=config_meta["vocab_size"],
     )
@@ -925,44 +930,80 @@ def train(cfg):
     #moving, not frozen)
     last_log_time = time.time()
 
-    for step in range(1, cfg.train_steps + 1):
-        x, y = next(batches)
+    #rolling window of the most recent losses. training stops once the average
+    #across a full window of target_window steps drops to/below target_loss.
+    #a deque with maxlen automatically drops the oldest loss as new ones arrive.
+    from collections import deque
+    recent_losses = deque(maxlen=cfg.target_window)
 
-        #forward: make predictions
-        logits, h, caches = forward(x, p, cfg)
+    #there is no fixed step count anymore: count up forever and stop on either
+    #the loss target or an interruption (ctrl-c).
+    step = 0
 
-        #backward: calculate loss and gradients.
-        loss, grads = backward(x, y, logits, h, caches, p, cfg)
+    #wrap the loop so an interruption still saves progress instead of losing it.
+    try:
+        while True:
+            step += 1
 
-        #optimizer: update weights using raw gradients
-        gradient_descent_update(
-            p=p,
-            grads=grads,
-            lr=cfg.learning_rate,
-        )
+            x, y = next(batches)
 
-        #print the starting loss (step 1) so the baseline the descent works
-        #down from is visible, then print every log_every steps after that.
-        #flush=True so the loss appears live even when stdout is piped/redirected.
-        #the per-step seconds make it obvious training is progressing (and how fast).
-        if step == 1 or step % cfg.log_every == 0:
-            now = time.time()
-            steps_since = step if step == 1 else cfg.log_every
-            per_step = (now - last_log_time) / max(1, steps_since)
-            last_log_time = now
-            print(f"step={step} loss={loss:.4f} ({per_step:.2f}s/step)", flush=True)
+            #forward: make predictions
+            logits, h, caches = forward(x, p, cfg)
 
-        #optional early stop: if a target loss is set and we've reached it, stop
-        #training before burning through the remaining steps.
-        if cfg.target_loss and loss <= cfg.target_loss:
-            print(
-                f"reached target loss {cfg.target_loss} at step {step} "
-                f"(loss={loss:.4f}), stopping early",
-                flush=True,
+            #backward: calculate loss and gradients.
+            loss, grads = backward(x, y, logits, h, caches, p, cfg)
+
+            #optimizer: update weights using raw gradients
+            gradient_descent_update(
+                p=p,
+                grads=grads,
+                lr=cfg.learning_rate,
             )
-            break
 
-    #persist the trained weights so they can be reused for inference or resumed.
+            #track this loss for the rolling average
+            recent_losses.append(loss)
+
+            #print the starting loss (step 1) so the baseline the descent works
+            #down from is visible, then print every log_every steps after that.
+            #flush=True so the loss appears live even when stdout is piped/redirected.
+            #the per-step seconds make it obvious training is progressing (and how fast).
+            if step == 1 or step % cfg.log_every == 0:
+                now = time.time()
+                steps_since = step if step == 1 else cfg.log_every
+                per_step = (now - last_log_time) / max(1, steps_since)
+                last_log_time = now
+                avg = sum(recent_losses) / len(recent_losses)
+                print(
+                    f"step={step} loss={loss:.4f} "
+                    f"avg{len(recent_losses)}={avg:.4f} ({per_step:.2f}s/step)",
+                    flush=True,
+                )
+
+            #periodic checkpoint so progress survives a crash/interruption even
+            #before the loss target is reached.
+            if cfg.model_output and step % cfg.checkpoint_every == 0:
+                save_model(cfg.model_output, p, cfg)
+
+            #early stop: only once we have a full window of recent losses, check
+            #whether their average has reached the target.
+            if (
+                cfg.target_loss
+                and len(recent_losses) == cfg.target_window
+                and sum(recent_losses) / cfg.target_window <= cfg.target_loss
+            ):
+                avg = sum(recent_losses) / cfg.target_window
+                print(
+                    f"average loss over last {cfg.target_window} steps "
+                    f"({avg:.4f}) reached target {cfg.target_loss} at step "
+                    f"{step}, stopping",
+                    flush=True,
+                )
+                break
+    except KeyboardInterrupt:
+        #ctrl-c: stop training but keep what we have
+        print(f"\ninterrupted at step {step}", flush=True)
+
+    #persist the final weights so they can be reused for inference or resumed.
     if cfg.model_output:
         save_model(cfg.model_output, p, cfg)
 
