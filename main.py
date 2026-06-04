@@ -52,6 +52,21 @@ train_steps = 2000
 #how often (in steps) to print the training loss to stdout
 log_every = 1
 
+#where to save the trained model when training finishes.
+#set to a path like '/home/sfo/data/models/model.npz' to save; False to skip.
+model_output = '/home/sfo/data/models/model.npz'
+#model_output = False
+
+#path to an existing saved model to continue training from.
+#set to a saved .npz path to resume; False to start from fresh random weights.
+resume_from = False
+#resume_from = '/home/sfo/data/models/model.npz'
+
+#optional early-stopping target loss. training stops once loss drops to/below
+#this value. set to False to always run the full train_steps.
+target_loss = False
+#target_loss = 0.5
+
 
 #=== pipeline ===
 
@@ -76,6 +91,10 @@ if training:
         learning_rate=learning_rate,
         train_steps=train_steps,
         log_every=log_every,
+        #saving / resuming / early-stop are all optional; False disables each.
+        model_output=str(model_output) if model_output else "",
+        resume_from=str(resume_from) if resume_from else "",
+        target_loss=float(target_loss) if target_loss else 0.0,
     )
     train(cfg)
 else:

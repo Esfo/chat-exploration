@@ -3,6 +3,7 @@ import numpy as np
 import math
 import json
 import time
+import os
 
 from read_paragraphs import read_paragraphs
 
@@ -50,6 +51,19 @@ class Config:
 
     #how often (in steps) to print the training loss to stdout
     log_every: int
+
+    #where to write the trained model after training finishes.
+    #set to a path like 'model.npz' to save; leave as "" / False to skip saving.
+    model_output: str = ""
+
+    #path to an existing saved model to continue training from.
+    #leave as "" / False to start from fresh random weights.
+    resume_from: str = ""
+
+    #optional early-stopping target. once the training loss drops to or below
+    #this value, training stops before reaching train_steps.
+    #leave as 0 / None to disable and always run the full train_steps.
+    target_loss: float = 0.0
 
     #number of possible token IDs
         #this gets set after the tokenizer builds the vocabulary from tokenpath
@@ -759,6 +773,86 @@ def generate(prompt, tokenizer, p, cfg, max_new_tokens=100):
     return tokenizer.decode(ids)
 
 
+#config fields that describe the model architecture / data and must be saved
+#alongside the weights so the model can be rebuilt for resuming or inference.
+#train_steps / log_every / model_output / resume_from / target_loss are run
+#controls, not part of the model, so they are intentionally left out.
+_SAVED_CONFIG_FIELDS = (
+    "context_length",
+    "d_model",
+    "n_layers",
+    "head_dim",
+    "mlp_multiplier",
+    "tokenpath",
+    "textsource",
+    "batch_size",
+    "learning_rate",
+    "vocab_size",
+)
+
+
+def save_model(path, p, cfg):
+    """
+    save trained weights plus the architecture config to a single .npz file.
+
+    the config travels with the weights so inference/resume never has to guess
+    the shapes the weights were trained with.
+    """
+
+    #every parameter array becomes one entry under its own name
+    arrays = {f"param.{name}": value for name, value in p.items()}
+
+    #pack the architecture config as a JSON string stored in a 0-d array
+    config_meta = {field: getattr(cfg, field) for field in _SAVED_CONFIG_FIELDS}
+    arrays["config_json"] = np.array(json.dumps(config_meta))
+
+    #make sure the destination directory exists before writing
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+
+    np.savez(path, **arrays)
+    print(f"model saved to {path}", flush=True)
+
+
+def load_model(path):
+    """
+    load weights and config previously written by save_model.
+
+    returns (p, cfg) where p is the parameter dict and cfg is a Config rebuilt
+    from the saved architecture fields. run controls (train_steps, etc.) are
+    left at their defaults for the caller to set.
+    """
+
+    data = np.load(path, allow_pickle=True)
+
+    #rebuild the parameter dict, stripping the "param." prefix
+    p = {
+        key[len("param."):]: data[key]
+        for key in data.files
+        if key.startswith("param.")
+    }
+
+    #rebuild the architecture config
+    config_meta = json.loads(str(data["config_json"]))
+    cfg = Config(
+        context_length=config_meta["context_length"],
+        d_model=config_meta["d_model"],
+        n_layers=config_meta["n_layers"],
+        head_dim=config_meta["head_dim"],
+        mlp_multiplier=config_meta["mlp_multiplier"],
+        tokenpath=config_meta["tokenpath"],
+        textsource=config_meta["textsource"],
+        batch_size=config_meta["batch_size"],
+        learning_rate=config_meta["learning_rate"],
+        train_steps=0,
+        log_every=1,
+        vocab_size=config_meta["vocab_size"],
+    )
+
+    return p, cfg
+
+
 def train(cfg):
     """
     main training loop
@@ -799,8 +893,22 @@ def train(cfg):
     print(f"mlp_size       = {cfg.d_model} × {cfg.d_ff}")
     print(f"total_blocks   = {cfg.n_layers}")
 
-    #initialize trainable weights
-    p = init_params(cfg)
+    #either continue from a saved model or start from fresh random weights.
+    if cfg.resume_from:
+        print(f"\nresuming from {cfg.resume_from}", flush=True)
+        p, saved_cfg = load_model(cfg.resume_from)
+
+        #the loaded weights only make sense if the vocabulary matches, otherwise
+        #the embedding table and output head have the wrong number of rows/columns.
+        if saved_cfg.vocab_size != cfg.vocab_size:
+            raise ValueError(
+                f"saved model vocab_size ({saved_cfg.vocab_size}) does not match "
+                f"current tokenizer vocab_size ({cfg.vocab_size}). "
+                "use the same tokenpath the model was trained with."
+            )
+    else:
+        #initialize trainable weights
+        p = init_params(cfg)
 
     #streaming batch generator
     #it yields:
@@ -843,6 +951,20 @@ def train(cfg):
             per_step = (now - last_log_time) / max(1, steps_since)
             last_log_time = now
             print(f"step={step} loss={loss:.4f} ({per_step:.2f}s/step)", flush=True)
+
+        #optional early stop: if a target loss is set and we've reached it, stop
+        #training before burning through the remaining steps.
+        if cfg.target_loss and loss <= cfg.target_loss:
+            print(
+                f"reached target loss {cfg.target_loss} at step {step} "
+                f"(loss={loss:.4f}), stopping early",
+                flush=True,
+            )
+            break
+
+    #persist the trained weights so they can be reused for inference or resumed.
+    if cfg.model_output:
+        save_model(cfg.model_output, p, cfg)
 
     print(generate("", tokenizer, p, cfg))
 
