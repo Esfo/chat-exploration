@@ -37,10 +37,10 @@ training = True
 context_length = 64
 
 #width of the model's internal token vector
-d_model = 256
+d_model = 192
 
 #number of transformer blocks
-n_layers = 3
+n_layers = 2
 
 #width of one attention head (n_heads = d_model / head_dim)
 head_dim = 64
