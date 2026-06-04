@@ -44,7 +44,7 @@ mlp_multiplier = 4.0
 batch_size = 8
 
 #how large each training update is
-learning_rate = 1e-3
+learning_rate = 0.5
 
 #number of training steps to run
 train_steps = 2000

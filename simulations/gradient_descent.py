@@ -1,56 +1,108 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-method = "plain"           #"plain" steps straight downhill; "adam" adapts the step per weight
-learning_rate = 0.05       #step size: too big and it blows up, too small and it crawls
-start_weights = [4.5, 3.0] #the model's two weights before this step of training
-sensitivity = [1.0, 12.0]  #how hard the loss reacts to each weight (uneven on purpose)
-max_steps = 80             #how many update steps to take
-beta1 = 0.9                #adam: how much of the old gradient average to keep
-beta2 = 0.999              #adam: how much of the old squared-gradient average to keep
+learning_rate = 0.05                   #how large each update step is
+starting_slope = -2.5                  #model's first guess for the line slope
+starting_intercept = 3.5               #model's first guess for the line intercept
+max_training_steps = 120               #how many weight updates to run
 
-weights = np.array(start_weights, dtype=float)
-sensitivity = np.array(sensitivity, dtype=float)
+rng = np.random.default_rng(0)
 
-m = np.zeros(2)            #adam's running average of the gradient
-v = np.zeros(2)            #adam's running average of the squared gradient
-path = [weights.copy()]
+#training data: the model sees these inputs and target outputs
+#the hidden pattern is roughly target = 1.8 * input - 0.7
+input_values = np.linspace(-2, 2, 20)
+target_values = 1.8 * input_values - 0.7 + rng.normal(0, 0.25, len(input_values))
 
-for step in range(1, max_steps + 1):
-    gradient = sensitivity * weights  #in a real model backprop produces this
-    if method == "plain":
-        weights = weights - learning_rate * gradient
-    else:
-        m = beta1 * m + (1 - beta1) * gradient
-        v = beta2 * v + (1 - beta2) * gradient ** 2
-        m = m / (1 - beta1 ** step)   #the averages start at zero, so scale them up early
-        v = v / (1 - beta2 ** step)
-        weights = weights - learning_rate * m / (np.sqrt(v) + 1e-8)
-    path.append(weights.copy())
+current_slope = starting_slope
+current_intercept = starting_intercept
 
-path = np.array(path)
-loss = 0.5 * (sensitivity * path ** 2).sum(axis=1)  #how wrong the model is at each step
+slope_history = [current_slope]
+intercept_history = [current_intercept]
+loss_history = []
 
-print("weights in :", path[0])
-print("weights out:", path[-1].round(4))  #these get written back into the model
-print("loss       :", loss[0].round(4), "->", loss[-1].round(4))
+for training_step in range(1, max_training_steps + 1):
+    #forward pass: use the current weights to make predictions
+    predicted_values = current_slope * input_values + current_intercept
 
-# %%
-grid = np.linspace(-5, 5, 200)
-w1, w2 = np.meshgrid(grid, grid)
-surface = 0.5 * (sensitivity[0] * w1 ** 2 + sensitivity[1] * w2 ** 2)
+    #prediction_errors says how wrong each prediction was
+    prediction_errors = predicted_values - target_values
 
-fig, (top, bottom) = plt.subplots(2, 1, figsize=(7, 11))
-top.contour(w1, w2, surface, levels=30, cmap="viridis", alpha=0.6)
-top.plot(path[:, 0], path[:, 1], "o-", color="crimson", ms=3, lw=1)
-top.plot(0, 0, "*", color="gold", ms=20, mec="black")  #lowest loss
-top.set_xlabel("weight 1")
-top.set_ylabel("weight 2")
-top.set_title(f"{method}, learning_rate={learning_rate}")
+    #loss is the average wrongness across all training examples
+    loss = 0.5 * np.mean(prediction_errors ** 2)
+    loss_history.append(loss)
 
-bottom.plot(loss, "o-", color="crimson", ms=3)
-bottom.set_xlabel("step")
-bottom.set_ylabel("loss")
+    #gradient means "how the loss changes if this weight changes"
+    #in a larger model, backpropagation produces these gradients
+    gradient_for_slope = np.mean(prediction_errors * input_values)
+    gradient_for_intercept = np.mean(prediction_errors)
+
+    #gradient descent: move each weight in the direction that lowers loss
+    current_slope = current_slope - learning_rate * gradient_for_slope
+    current_intercept = current_intercept - learning_rate * gradient_for_intercept
+
+    slope_history.append(current_slope)
+    intercept_history.append(current_intercept)
+
+slope_history = np.array(slope_history)
+intercept_history = np.array(intercept_history)
+loss_history = np.array(loss_history)
+
+print("slope in      :", starting_slope)
+print("intercept in  :", starting_intercept)
+print("slope out     :", round(current_slope, 4))
+print("intercept out :", round(current_intercept, 4))
+print("loss          :", round(loss_history[0], 4), "->", round(loss_history[-1], 4))
+
+#make predictions with the trained line
+trained_predictions = current_slope * input_values + current_intercept
+
+#make a loss surface over many possible slope/intercept pairs
+slope_grid_values = np.linspace(-4, 4, 200)
+intercept_grid_values = np.linspace(-4, 4, 200)
+slope_grid, intercept_grid = np.meshgrid(slope_grid_values, intercept_grid_values)
+
+loss_surface = np.zeros_like(slope_grid)
+
+for point_index in range(len(input_values)):
+    surface_predictions = slope_grid * input_values[point_index] + intercept_grid
+    surface_errors = surface_predictions - target_values[point_index]
+    loss_surface += 0.5 * surface_errors ** 2 / len(input_values)
+
+fig, (data_plot, loss_surface_plot, loss_history_plot) = plt.subplots(3, 1, figsize=(7, 14))
+
+data_plot.scatter(input_values, target_values, color="black", label="training data")
+data_plot.plot(input_values, trained_predictions, color="crimson", label="trained line")
+data_plot.set_xlabel("input value")
+data_plot.set_ylabel("target value")
+data_plot.set_title("the model learns a line that fits the data")
+data_plot.legend()
+
+loss_surface_plot.contour(
+    slope_grid,
+    intercept_grid,
+    loss_surface,
+    levels=30,
+    cmap="viridis",
+    alpha=0.6
+)
+
+loss_surface_plot.plot(
+    slope_history,
+    intercept_history,
+    "o-",
+    color="crimson",
+    ms=3,
+    lw=1
+)
+
+loss_surface_plot.set_xlabel("slope")
+loss_surface_plot.set_ylabel("intercept")
+loss_surface_plot.set_title("gradient descent path through weight space")
+
+loss_history_plot.plot(loss_history, "o-", color="crimson", ms=3)
+loss_history_plot.set_xlabel("training step")
+loss_history_plot.set_ylabel("loss")
+loss_history_plot.set_title("loss falls as the line improves")
 
 plt.tight_layout()
 plt.show()

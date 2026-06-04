@@ -718,55 +718,17 @@ def backward(x, y, logits, h, caches, p, cfg):
     return loss, grads
 
 
-def adamw_update(p, grads, state, lr, step, weight_decay=0.01, beta1=0.9, beta2=0.999, eps=1e-8):
+def gradient_descent_update(p, grads, lr):
     """
-    update parameters using AdamW
-    gradients say which way to move, and this optimizer decides how to move smoothly and safely
+    update parameters using plain gradient descent
 
-    p: trainable parameters
-    grads: gradients from backpropagation
-    state: optimizer memory
+    p: trainable model weights
+    grads: gradients produced by backpropagation
     lr: learning rate
-    step: current training step
-
-    smooths the average gradient direction
-    beta1 = 0.9
-
-    smooths the average squared gradient size
-    beta2 = 0.999
-
-    tiny number to avoid division by zero
-    eps = 1e-8
-
-    gently pushes weights toward smaller values
-    weight_decay = 0.01
     """
-
-    #create optimizer memory
-        #m: moving average of gradients
-        #v: moving average of squared gradients
-    if not state:
-        state["m"] = {name: np.zeros_like(value) for name, value in p.items()}
-        state["v"] = {name: np.zeros_like(value) for name, value in p.items()}
 
     for name in p:
-        grad = grads[name]
-
-        #update moving averages
-        state["m"][name] = beta1 * state["m"][name] + (1 - beta1) * grad
-        state["v"][name] = beta2 * state["v"][name] + (1 - beta2) * (grad * grad)
-
-        #bias correction
-            #early moving averages are biased toward zero
-            #these corrections compensate for that
-        m_hat = state["m"][name] / (1 - beta1 ** step)
-        v_hat = state["v"][name] / (1 - beta2 ** step)
-
-        #Adam update
-        update = m_hat / (np.sqrt(v_hat) + eps)
-
-        #AdamW update
-        p[name] -= lr * (update + weight_decay * p[name])
+        p[name] -= lr * grads[name]
 
 
 def generate(prompt, tokenizer, p, cfg, max_new_tokens=100):
@@ -840,9 +802,6 @@ def train(cfg):
     #initialize trainable weights
     p = init_params(cfg)
 
-    #optimizer memory starts empty
-    optimizer_state = {}
-
     #streaming batch generator
     #it yields:
         #x = input token IDs
@@ -867,13 +826,11 @@ def train(cfg):
         #backward: calculate loss and gradients.
         loss, grads = backward(x, y, logits, h, caches, p, cfg)
 
-        #optimizer: update weights.
-        adamw_update(
+        #optimizer: update weights using raw gradients
+        gradient_descent_update(
             p=p,
             grads=grads,
-            state=optimizer_state,
             lr=cfg.learning_rate,
-            step=step,
         )
 
         #print the starting loss (step 1) so the baseline the descent works

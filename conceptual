@@ -1,0 +1,100 @@
+word slices are made into tokens, represented as integers
+
+various matrices of the model are initiated
+
+initiated as small random floats that average around 0:
+    attention matrices:
+        Wq
+        Wk
+        Wv
+        Wo
+
+token embedding table
+MLP/feedforward matrices
+final output/unembedding
+
+
+token embedding table just turns token IDs into vectors
+
+
+Attention Layer:
+
+query asks
+key matches
+value answers
+
+query: the cat sat because it was tired
+    if each word was a token, then each word also has its own position
+to match: how relevant is this prior token to this current token?
+    for each position the query asks if each word is relevant to another word in the sentence
+value: the output is a probability of how good the match is
+    it eventually realizes that 'it' and 'cat' are relevant to each other, with every other results yielding a much lower probability
+
+How the matrices work:
+
+A) Matrix Multiplication Examples
+    A shape: [rows, shared]
+    B shape: [shared, columns]
+    A @ B shape: [rows, columns]
+
+    let's do x @ y
+    x = [[1, 2],
+         [3, 4]]
+    y = [[5, 6],
+         [7, 8]]
+
+    First result cell:
+    top-left = row 1 of x · column 1 of y
+             = [1, 2] · [5, 7]
+             = 1*5 + 2*7
+             = 19
+
+    Top-right:
+    top-right = row 1 of x · column 2 of y
+              = [1, 2] · [6, 8]
+              = 1*6 + 2*8
+              = 22
+
+    Bottom-left:
+    bottom-left = row 2 of x · column 1 of y
+                = [3, 4] · [5, 7]
+                = 3*5 + 4*7
+                = 43
+
+    Bottom-right:
+    bottom-right = row 2 of x · column 2 of y
+                 = [3, 4] · [6, 8]
+                 = 3*6 + 4*8
+                 = 50
+
+    So:
+    x @ y =
+    [[19, 22],
+     [43, 50]]
+
+
+B) Context of the Attention Layers
+
+    query and key vectors are the same size
+    value vectors tend to be but they don't need to be
+
+    X = input token vectors
+
+    Q = X @ Wq
+    K = X @ Wk
+    V = X @ Wv
+
+    Q @ K.T = relevance_scores
+        gives a square matrix
+        (decide the routing)
+
+    attention_weights = softmax(relevance_scores)
+        softmax raises everything to e^, gets positive values and makes them probabilities, basically
+
+    mixed_value_information = attention_weights @ V
+        (send the message of probabilities through route)
+
+    context_represented_as_a_vector = mixed_value_information @ Wo
+        Wo being output weights
+        this is uniquely shaped to translate this message from Qv to the perceptron's shape
+        (rewrite the received message into the model's main vector language)

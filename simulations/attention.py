@@ -1,110 +1,237 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-#attention as a soft dictionary lookup: each item carries a key and a value, a
-#query asks for one key, and the model must learn to look at the matching item
-#and read back its value. this is the mechanism at the heart of training.py.
+#one tiny language-model training loop: words become ids, ids become vectors,
+#one attention layer mixes prior words, and the model predicts the next word.
+#edit only the paragraph if you want to change the training text.
 
-n = 5                 #number of items in each sequence
-d = 16                #size of the query/key space the model projects into
-learning_rate = 0.1
-max_rounds = 20000
-batch_size = 32
+paragraph = """
+The cat sat because it was tired
+Penguins slide down icy ramps whenever they feel bored
+Dogs run when they're happy
+The bird slept because it was quiet
+Fish never swim when waters are calm
+"""
+
+paragraph_lines = [line.strip().lower() for line in paragraph.strip().splitlines() if line.strip()]
+line_words = [line.split() for line in paragraph_lines]
+
+tokens = [word for words in line_words for word in words]
+vocab = sorted(set(tokens))
+word_to_id = {word: word_id for word_id, word in enumerate(vocab)}
+id_to_word = {word_id: word for word, word_id in word_to_id.items()}
+
+line_token_ids = [
+    np.array([word_to_id[word] for word in words])
+    for words in line_words
+]
+
+context_len = 10             #how many prior words the model can see
+vocab_size = len(vocab)
+model_vector_size = 24      #size of each word vector inside the model
+attention_vector_size = 24  #size of query/key/value vectors
+learning_rate = 0.05
+max_rounds = 5000
+batch_size = 16
 
 rng = np.random.default_rng(0)
 
-def make_example():
-    keys = rng.permutation(n)            #every item gets a distinct key id (0..n-1)
-    values = rng.integers(0, n, n)       #...and some value id (may repeat)
-    ask = rng.integers(0, n)             #we will ask for the key held at this position
-    x = np.zeros((n, 2 * n))
-    x[np.arange(n), keys] = 1            #first n columns: the key, one-hot
-    x[np.arange(n), n + values] = 1      #next n columns: the value, one-hot
-    query = np.zeros(2 * n)
-    query[keys[ask]] = 1                 #the query is just the key we're asking for
-    return x, query, values[ask], ask    #target is the value at the matching item
+training_examples = []
 
-#the only trainable weights: how to project items into keys, the query into a
-#query vector, and items into the values that get read out
-wk = rng.normal(0, 1 / np.sqrt(2 * n), (2 * n, d))
-wq = rng.normal(0, 1 / np.sqrt(2 * n), (2 * n, d))
-wv = rng.normal(0, 1 / np.sqrt(2 * n), (2 * n, n))
+for line_index, token_ids in enumerate(line_token_ids):
+    for target_position in range(1, len(token_ids)):
+        training_examples.append((line_index, target_position))
 
-def softmax(z):
-    z = z - z.max()
-    e = np.exp(z)
-    return e / e.sum()
+if len(training_examples) == 0:
+    raise ValueError("paragraph needs at least one line with at least two words")
+
+def softmax(values):
+    values = values - values.max()
+    exponentials = np.exp(values)
+    return exponentials / exponentials.sum()
+
+#trainable weights
+#embedding_weights turns one-hot word ids into model vectors
+#query_weights makes the current word's query vector
+#key_weights makes each prior word's key vector
+#value_weights makes each prior word's value vector
+#attention_output_weights writes the attention result back into model-vector space
+#output_token_weights turns the final model vector into raw next-word scores
+embedding_weights = rng.normal(0, 1 / np.sqrt(vocab_size), (vocab_size, model_vector_size))
+query_weights = rng.normal(0, 1 / np.sqrt(model_vector_size), (model_vector_size, attention_vector_size))
+key_weights = rng.normal(0, 1 / np.sqrt(model_vector_size), (model_vector_size, attention_vector_size))
+value_weights = rng.normal(0, 1 / np.sqrt(model_vector_size), (model_vector_size, attention_vector_size))
+attention_output_weights = rng.normal(0, 1 / np.sqrt(attention_vector_size), (attention_vector_size, model_vector_size))
+output_token_weights = rng.normal(0, 1 / np.sqrt(model_vector_size), (model_vector_size, vocab_size))
 
 losses, accuracies = [], []
 rounds = 0
-streak = 0      #how many rounds in a row it has gotten a whole batch right
+streak = 0
 
 while True:
-    g_wk = np.zeros_like(wk)
-    g_wq = np.zeros_like(wq)
-    g_wv = np.zeros_like(wv)
+    #gradient_for_ means "how this weight should change to reduce the loss"
+    #these start at zero each round and accumulate gradients across the batch
+    gradient_for_embedding_weights = np.zeros_like(embedding_weights)
+    gradient_for_query_weights = np.zeros_like(query_weights)
+    gradient_for_key_weights = np.zeros_like(key_weights)
+    gradient_for_value_weights = np.zeros_like(value_weights)
+    gradient_for_attention_output_weights = np.zeros_like(attention_output_weights)
+    gradient_for_output_token_weights = np.zeros_like(output_token_weights)
+
     batch_loss = 0.0
     batch_correct = 0
 
     for _ in range(batch_size):
-        x, query, target, _ = make_example()
+        line_index, target_position = training_examples[rng.integers(0, len(training_examples))]
+        token_ids = line_token_ids[line_index]
 
-        #forward: project, score every item against the query, soften, read values
-        k = x @ wk                       #(n, d) a key vector per item
-        q = query @ wq                   #(d,)   the query vector
-        scores = k @ q / np.sqrt(d)      #(n,)   how well each item matches the query
-        attn = softmax(scores)           #(n,)   attention: where the query looks
-        v = x @ wv                       #(n, n) a value vector per item
-        out = attn @ v                   #(n,)   the read-out, used as logits
-        probs = softmax(out)
+        context_start = max(0, target_position - context_len)
+        training_context_ids = token_ids[context_start:target_position]
+        target_word_id = token_ids[target_position]
+        context_length = len(training_context_ids)
 
-        batch_loss += -np.log(probs[target] + 1e-12)
-        batch_correct += int(probs.argmax() == target)
+        #make one-hot rows for the words in this training context
+        context_word_one_hots = np.zeros((context_length, vocab_size))
+        context_word_one_hots[np.arange(context_length), training_context_ids] = 1
 
-        #backward: send the error back through read-out, attention, and projections
-        d_out = probs.copy()
-        d_out[target] -= 1               #cross-entropy gradient on the logits
-        d_attn = v @ d_out               #(n,) blame flowing to the attention weights
-        g_wv += x.T @ np.outer(attn, d_out)
-        d_scores = attn * (d_attn - d_attn @ attn)   #softmax derivative for attention
-        d_scores /= np.sqrt(d)
-        d_k = np.outer(d_scores, q)      #(n, d)
-        d_q = k.T @ d_scores             #(d,)
-        g_wk += x.T @ d_k
-        g_wq += np.outer(query, d_q)
+        #forward: word ids -> word vectors -> attention -> next-word prediction
+        context_word_vectors = context_word_one_hots @ embedding_weights
 
-    wk -= learning_rate * g_wk / batch_size
-    wq -= learning_rate * g_wq / batch_size
-    wv -= learning_rate * g_wv / batch_size
+        query_vector = context_word_vectors[-1] @ query_weights
+        key_vectors = context_word_vectors @ key_weights
+        value_vectors = context_word_vectors @ value_weights
+
+        relevance_values = key_vectors @ query_vector / np.sqrt(attention_vector_size)
+        attention_probabilities = softmax(relevance_values)
+
+        mixed_value_vector = attention_probabilities @ value_vectors
+        attention_layer_vector = mixed_value_vector @ attention_output_weights
+
+        #logits are raw next-word scores before softmax turns them into probabilities
+        logits = attention_layer_vector @ output_token_weights
+        next_word_probabilities = softmax(logits)
+
+        batch_loss += -np.log(next_word_probabilities[target_word_id] + 1e-12)
+        batch_correct += int(next_word_probabilities.argmax() == target_word_id)
+
+        #backward: each gradient says how the loss changes when that value changes
+        gradient_for_logits = next_word_probabilities.copy()
+        gradient_for_logits[target_word_id] -= 1
+
+        gradient_for_output_token_weights += np.outer(attention_layer_vector, gradient_for_logits)
+        gradient_for_attention_layer_vector = output_token_weights @ gradient_for_logits
+
+        gradient_for_attention_output_weights += np.outer(mixed_value_vector, gradient_for_attention_layer_vector)
+        gradient_for_mixed_value_vector = attention_output_weights @ gradient_for_attention_layer_vector
+
+        gradient_for_attention_probabilities = value_vectors @ gradient_for_mixed_value_vector
+        gradient_for_value_vectors = np.outer(attention_probabilities, gradient_for_mixed_value_vector)
+
+        gradient_for_relevance_values = attention_probabilities * (
+            gradient_for_attention_probabilities
+            - gradient_for_attention_probabilities @ attention_probabilities
+        )
+        gradient_for_relevance_values /= np.sqrt(attention_vector_size)
+
+        gradient_for_key_vectors = np.outer(gradient_for_relevance_values, query_vector)
+        gradient_for_query_vector = key_vectors.T @ gradient_for_relevance_values
+
+        gradient_for_value_weights += context_word_vectors.T @ gradient_for_value_vectors
+        gradient_for_key_weights += context_word_vectors.T @ gradient_for_key_vectors
+        gradient_for_query_weights += np.outer(context_word_vectors[-1], gradient_for_query_vector)
+
+        gradient_for_context_word_vectors = gradient_for_value_vectors @ value_weights.T
+        gradient_for_context_word_vectors += gradient_for_key_vectors @ key_weights.T
+        gradient_for_context_word_vectors[-1] += gradient_for_query_vector @ query_weights.T
+
+        gradient_for_embedding_weights += context_word_one_hots.T @ gradient_for_context_word_vectors
+
+    #gradient descent: update every trainable weight slightly
+    embedding_weights -= learning_rate * gradient_for_embedding_weights / batch_size
+    query_weights -= learning_rate * gradient_for_query_weights / batch_size
+    key_weights -= learning_rate * gradient_for_key_weights / batch_size
+    value_weights -= learning_rate * gradient_for_value_weights / batch_size
+    attention_output_weights -= learning_rate * gradient_for_attention_output_weights / batch_size
+    output_token_weights -= learning_rate * gradient_for_output_token_weights / batch_size
 
     losses.append(batch_loss / batch_size)
     accuracies.append(batch_correct / batch_size)
+
     rounds += 1
     streak = streak + 1 if accuracies[-1] == 1.0 else 0
-    if streak >= 500:        #keep going past the first success to sharpen the attention
+
+    if streak >= 200:
         break
     if rounds >= max_rounds:
         break
 
-print("solved" if streak >= 500 else "gave up", "after", rounds, "rounds")
+print("solved" if streak >= 200 else "gave up", "after", rounds, "rounds")
 
-#show where the trained model looks on one fresh example
-x, query, target, ask = make_example()
-attn = softmax((x @ wk) @ (query @ wq) / np.sqrt(d))
-print(f"asked for the key at item {ask}; attention there = {attn[ask]:.2f}")
+#evaluate every next-word prediction from every line
+eval_loss = 0.0
+eval_correct = 0
 
-# %%
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4.5))
+print()
+print("line predictions")
 
-ax1.plot(losses, color="crimson", label="loss")
-ax1.plot(accuracies, color="green", label="accuracy")
-ax1.set_xlabel("round")
-ax1.set_title(f"learned to look up the right item in {rounds} rounds")
-ax1.legend()
+for line_index, token_ids in enumerate(line_token_ids):
+    print()
+    print("line:", paragraph_lines[line_index])
 
-ax2.bar(range(n), attn, color=["green" if i == ask else "steelblue" for i in range(n)])
-ax2.set_xlabel("item position")
-ax2.set_ylabel("attention weight")
-ax2.set_title(f"the query asked for item {ask}; attention spikes there")
+    predicted_line_words = [id_to_word[token_ids[0]]]
+
+    for target_position in range(1, len(token_ids)):
+        context_start = max(0, target_position - context_len)
+        training_context_ids = token_ids[context_start:target_position]
+        target_word_id = token_ids[target_position]
+        context_length = len(training_context_ids)
+
+        context_word_one_hots = np.zeros((context_length, vocab_size))
+        context_word_one_hots[np.arange(context_length), training_context_ids] = 1
+
+        context_word_vectors = context_word_one_hots @ embedding_weights
+
+        query_vector = context_word_vectors[-1] @ query_weights
+        key_vectors = context_word_vectors @ key_weights
+        value_vectors = context_word_vectors @ value_weights
+
+        relevance_values = key_vectors @ query_vector / np.sqrt(attention_vector_size)
+        attention_probabilities = softmax(relevance_values)
+
+        mixed_value_vector = attention_probabilities @ value_vectors
+        attention_layer_vector = mixed_value_vector @ attention_output_weights
+
+        logits = attention_layer_vector @ output_token_weights
+        next_word_probabilities = softmax(logits)
+
+        predicted_word_id = next_word_probabilities.argmax()
+        predicted_line_words.append(id_to_word[predicted_word_id])
+
+        eval_loss += -np.log(next_word_probabilities[target_word_id] + 1e-12)
+        eval_correct += int(predicted_word_id == target_word_id)
+
+        context_words = [id_to_word[word_id] for word_id in training_context_ids]
+
+        print("context:  ", " ".join(context_words))
+        print("target:   ", id_to_word[target_word_id])
+        print("predicted:", id_to_word[predicted_word_id])
+        print("attention:", np.round(attention_probabilities, 3))
+        print()
+
+    print("predicted line:", " ".join(predicted_line_words))
+
+print()
+print("paragraph evaluation")
+print(f"accuracy: {eval_correct / len(training_examples):.3f}")
+print(f"loss:     {eval_loss / len(training_examples):.3f}")
+
+fig, ax = plt.subplots(figsize=(7, 4.5))
+
+ax.plot(losses, color="crimson", label="loss")
+ax.plot(accuracies, color="green", label="accuracy")
+ax.set_xlabel("round")
+ax.set_title(f"trained next-word prediction in {rounds} rounds")
+ax.legend()
+
 plt.tight_layout()
 plt.show()
