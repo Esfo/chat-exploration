@@ -631,7 +631,7 @@ def train(cfg):
             print(f"torch.compile unavailable ({exc}); continuing without compile", flush=True)
             model = raw_model
 
-    scaler = torch.cuda.amp.GradScaler(enabled=use_scaler)
+    scaler = torch.amp.GradScaler("cuda", enabled=use_scaler)
     train_loader = make_loader(train_paragraphs, tokenizer, cfg, shuffle=True)
     train_iter = iter(train_loader)
     val_loader = make_loader(val_paragraphs, tokenizer, cfg, shuffle=False) if val_paragraphs else None

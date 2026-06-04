@@ -1,3 +1,5 @@
+from multiprocessing import freeze_support
+
 from word_survival import word_survival
 from training import Config, train
 
@@ -122,66 +124,72 @@ sample_top_p = 0.95
 sample_greedy = False
 
 
-#=== pipeline ===
+def main():
+    #=== pipeline ===
 
-if tokenoutput:
-    tokensfile = word_survival(textsource, tokenoutput, survivalrounds, coveragetest)
-    print('tokens written to', tokensfile)
-else:
-    tokensfile = tokeninput
-    print('using existing tokens at', tokensfile)
+    if tokenoutput:
+        tokensfile = word_survival(textsource, tokenoutput, survivalrounds, coveragetest)
+        print('tokens written to', tokensfile)
+    else:
+        tokensfile = tokeninput
+        print('using existing tokens at', tokensfile)
 
-if training:
-    cfg = Config(
-        context_length=context_length,
-        d_model=d_model,
-        n_layers=n_layers,
-        head_dim=head_dim,
-        mlp_multiplier=mlp_multiplier,
-        #paths come from this gateway, not from training.py
-        tokenpath=str(tokensfile),
-        textsource=textsource,
-        batch_size=batch_size,
-        learning_rate=learning_rate,
-        log_every=log_every,
-        #saving / resuming / early-stop are all optional; False disables each.
-        model_output=str(model_output) if model_output else "",
-        resume_from=str(resume_from) if resume_from else "",
-        target_loss=float(target_loss) if target_loss else 0.0,
-        target_window=target_window,
-        checkpoint_every=checkpoint_every,
-        max_steps=max_steps,
-        device=device,
-        dtype=dtype,
-        compile_model=compile_model,
-        optimizer=optimizer,
-        weight_decay=weight_decay,
-        beta1=beta1,
-        beta2=beta2,
-        grad_clip=grad_clip,
-        scheduler=scheduler,
-        warmup_steps=warmup_steps,
-        min_learning_rate=min_learning_rate,
-        plateau_factor=plateau_factor,
-        plateau_patience=plateau_patience,
-        num_workers=num_workers,
-        prefetch_factor=prefetch_factor,
-        pin_memory=pin_memory,
-        validation_fraction=validation_fraction,
-        eval_every=eval_every,
-        eval_batches=eval_batches,
-        seed=seed,
-        norm_type=norm_type,
-        use_rope=use_rope,
-        use_swiglu=use_swiglu,
-        tie_weights=tie_weights,
-        dropout=dropout,
-        sample_max_new_tokens=sample_max_new_tokens,
-        sample_temperature=sample_temperature,
-        sample_top_k=sample_top_k,
-        sample_top_p=sample_top_p,
-        sample_greedy=sample_greedy,
-    )
-    train(cfg)
-else:
-    print('training disabled')
+    if training:
+        cfg = Config(
+            context_length=context_length,
+            d_model=d_model,
+            n_layers=n_layers,
+            head_dim=head_dim,
+            mlp_multiplier=mlp_multiplier,
+            #paths come from this gateway, not from training.py
+            tokenpath=str(tokensfile),
+            textsource=textsource,
+            batch_size=batch_size,
+            learning_rate=learning_rate,
+            log_every=log_every,
+            #saving / resuming / early-stop are all optional; False disables each.
+            model_output=str(model_output) if model_output else "",
+            resume_from=str(resume_from) if resume_from else "",
+            target_loss=float(target_loss) if target_loss else 0.0,
+            target_window=target_window,
+            checkpoint_every=checkpoint_every,
+            max_steps=max_steps,
+            device=device,
+            dtype=dtype,
+            compile_model=compile_model,
+            optimizer=optimizer,
+            weight_decay=weight_decay,
+            beta1=beta1,
+            beta2=beta2,
+            grad_clip=grad_clip,
+            scheduler=scheduler,
+            warmup_steps=warmup_steps,
+            min_learning_rate=min_learning_rate,
+            plateau_factor=plateau_factor,
+            plateau_patience=plateau_patience,
+            num_workers=num_workers,
+            prefetch_factor=prefetch_factor,
+            pin_memory=pin_memory,
+            validation_fraction=validation_fraction,
+            eval_every=eval_every,
+            eval_batches=eval_batches,
+            seed=seed,
+            norm_type=norm_type,
+            use_rope=use_rope,
+            use_swiglu=use_swiglu,
+            tie_weights=tie_weights,
+            dropout=dropout,
+            sample_max_new_tokens=sample_max_new_tokens,
+            sample_temperature=sample_temperature,
+            sample_top_k=sample_top_k,
+            sample_top_p=sample_top_p,
+            sample_greedy=sample_greedy,
+        )
+        train(cfg)
+    else:
+        print('training disabled')
+
+
+if __name__ == "__main__":
+    freeze_support()
+    main()
