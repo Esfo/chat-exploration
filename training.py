@@ -330,7 +330,39 @@ def build_tokenizer_from_jsonl(path):
     )
 
 
-def encode_corpus(textsource, tokenizer, cache_path=""):
+#paragraph tokenising is pure-Python and CPU-bound, so it parallelises well
+#across processes. each worker gets its own copy of the tokenizer once (via the
+#pool initialiser) instead of having it pickled on every task.
+_ENCODE_TOKENIZER = None
+
+
+def _init_encode_worker(tokenizer):
+    global _ENCODE_TOKENIZER
+    _ENCODE_TOKENIZER = tokenizer
+
+
+def _encode_paragraph_batch(paragraphs):
+    """encode a batch of paragraphs in a worker; returns one flat list of IDs."""
+    tokenizer = _ENCODE_TOKENIZER
+    ids = []
+    for paragraph in paragraphs:
+        ids.extend(tokenizer.encode(paragraph))
+    return ids
+
+
+def _batched(iterable, size):
+    """yield successive lists of up to `size` items from an iterable."""
+    batch = []
+    for item in iterable:
+        batch.append(item)
+        if len(batch) >= size:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
+
+
+def encode_corpus(textsource, tokenizer, cache_path="", num_workers=0):
     """
     read the whole corpus once and flatten it into a single 1-D tensor of token
     IDs (paragraphs separated by the EOS that encode() appends).
@@ -340,6 +372,8 @@ def encode_corpus(textsource, tokenizer, cache_path=""):
     (instead of re-tokenising while training) lets the DataLoader hand out chunks
     cheaply from many worker processes at once.
 
+    when num_workers > 0 the tokenising itself is spread across that many
+    processes (paragraphs are encoded in parallel, then concatenated in order).
     if cache_path is set, that same in-memory tensor is also written to disk so
     later runs load it instantly instead of re-tokenising. progress is printed as
     it goes so a long tokenise never looks frozen.
@@ -350,19 +384,48 @@ def encode_corpus(textsource, tokenizer, cache_path=""):
         print(f"loading encoded corpus from {cache_path}", flush=True)
         return torch.load(cache_path)
 
-    print("tokenising corpus (one-time)... ", flush=True)
-    all_ids = []
-    start = time.time()
-    for n_paragraphs, paragraph in enumerate(read_paragraphs(textsource), start=1):
-        all_ids.extend(tokenizer.encode(paragraph))
+    #how many paragraphs each task carries - big enough to amortise the
+    #inter-process hand-off, small enough to keep all workers fed.
+    batch_size = 2000
 
-        #periodic heartbeat so a long tokenise is visibly progressing
-        if n_paragraphs % 1000 == 0:
-            print(
-                f"  {n_paragraphs} paragraphs -> {len(all_ids)} token IDs "
-                f"({time.time() - start:.1f}s)",
-                flush=True,
-            )
+    start = time.time()
+    all_ids = []
+
+    if num_workers and num_workers > 0:
+        from multiprocessing import Pool
+
+        print(f"tokenising corpus (one-time) across {num_workers} processes... ", flush=True)
+        approx_paragraphs = 0
+        #imap keeps the results in submission order, so the corpus stays intact.
+        #the pool prefetches lazily, so memory use stays bounded as we stream.
+        with Pool(
+            processes=num_workers,
+            initializer=_init_encode_worker,
+            initargs=(tokenizer,),
+        ) as pool:
+            batches = _batched(read_paragraphs(textsource), batch_size)
+            for batch_index, ids in enumerate(pool.imap(_encode_paragraph_batch, batches), start=1):
+                all_ids.extend(ids)
+                approx_paragraphs = batch_index * batch_size
+                #heartbeat roughly every 50k paragraphs
+                if batch_index % 25 == 0:
+                    print(
+                        f"  ~{approx_paragraphs} paragraphs -> {len(all_ids)} token IDs "
+                        f"({time.time() - start:.1f}s)",
+                        flush=True,
+                    )
+    else:
+        print("tokenising corpus (one-time)... ", flush=True)
+        for n_paragraphs, paragraph in enumerate(read_paragraphs(textsource), start=1):
+            all_ids.extend(tokenizer.encode(paragraph))
+
+            #periodic heartbeat so a long tokenise is visibly progressing
+            if n_paragraphs % 1000 == 0:
+                print(
+                    f"  {n_paragraphs} paragraphs -> {len(all_ids)} token IDs "
+                    f"({time.time() - start:.1f}s)",
+                    flush=True,
+                )
 
     if len(all_ids) < 2:
         raise ValueError(
@@ -941,7 +1004,12 @@ def train(cfg):
     print(f"\ndevice         = {device} | optimizer = {cfg.optimizer} | amp = {cfg.use_amp}")
 
     #encode the whole corpus once, then split + wrap in DataLoaders
-    tokens = encode_corpus(cfg.textsource, tokenizer, cache_path=cfg.corpus_cache)
+    tokens = encode_corpus(
+        cfg.textsource,
+        tokenizer,
+        cache_path=cfg.corpus_cache,
+        num_workers=cfg.num_workers,
+    )
     print(f"corpus tokens  = {len(tokens)}", flush=True)
     train_loader, val_loader = make_loaders(tokens, cfg)
 
