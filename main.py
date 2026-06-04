@@ -40,6 +40,12 @@ head_dim = 64
 #controls how wide the MLP part gets inside each transformer block
 mlp_multiplier = 4.0
 
+#save the encoded token IDs (the integer-ID tensor, NOT the vocabulary jsonl)
+#to this .pt file so only the first run pays the tokenising cost; later runs
+#load it instantly. set to False to disable and re-tokenise every run.
+encoded_tokens_cache = '/home/sfo/data/models/tokens/encoded-tokens.pt'
+#encoded_tokens_cache = False
+
 #use rotary position encoding (RoPE) instead of a learned position-embedding
 #table. RoPE bakes position into attention by rotating queries/keys, generalises
 #better, and needs no position table. requires head_dim to be even.
@@ -151,6 +157,7 @@ if training:
         #paths come from this gateway, not from training.py
         tokenpath=str(tokensfile),
         textsource=textsource,
+        encoded_tokens_cache=str(encoded_tokens_cache) if encoded_tokens_cache else "",
         batch_size=batch_size,
         learning_rate=learning_rate,
         log_every=log_every,

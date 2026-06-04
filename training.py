@@ -136,6 +136,11 @@ class Config:
 
     #=== architecture options ===
 
+    #optional path to save the encoded token IDs (a .pt file holding the integer
+    #token-ID tensor, NOT the vocabulary jsonl). the first run writes it; later
+    #runs load it instantly instead of re-tokenising. "" = off.
+    encoded_tokens_cache: str = ""
+
     #use rotary position encoding (RoPE) instead of a learned position-embedding
     #table. RoPE rotates the query/key vectors by an amount that depends on each
     #token's position, so position is baked into attention itself. requires an
@@ -325,16 +330,25 @@ def build_tokenizer_from_jsonl(path):
     )
 
 
-def encode_corpus(textsource, tokenizer):
+def encode_corpus(textsource, tokenizer, cache_path=""):
     """
     read the whole corpus once and flatten it into a single 1-D tensor of token
     IDs (paragraphs separated by the EOS that encode() appends).
 
-    doing this once up front - instead of re-tokenising while training - lets the
-    DataLoader hand out chunks cheaply from many worker processes at once.
+    this whole tensor is held in memory for the duration of training - the
+    Dataset indexes into it to pull random chunks - so doing it once up front
+    (instead of re-tokenising while training) lets the DataLoader hand out chunks
+    cheaply from many worker processes at once.
 
-    progress is printed as it goes so a long tokenise never looks frozen.
+    if cache_path is set, that same in-memory tensor is also written to disk so
+    later runs load it instantly instead of re-tokenising. progress is printed as
+    it goes so a long tokenise never looks frozen.
     """
+
+    #reuse a previously saved encoding if one exists
+    if cache_path and os.path.exists(cache_path):
+        print(f"loading encoded tokens from {cache_path}", flush=True)
+        return torch.load(cache_path)
 
     print("tokenising corpus (one-time)... ", flush=True)
     all_ids = []
@@ -359,6 +373,15 @@ def encode_corpus(textsource, tokenizer):
     #int32 is plenty for vocab sizes here and halves the memory of int64
     tokens = torch.tensor(all_ids, dtype=torch.int32)
     print(f"tokenised {len(tokens)} token IDs in {time.time() - start:.1f}s", flush=True)
+
+    #save the encoded token IDs so the next run skips tokenising entirely
+    if cache_path:
+        directory = os.path.dirname(cache_path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        torch.save(tokens, cache_path)
+        print(f"saved encoded tokens to {cache_path}", flush=True)
+
     return tokens
 
 
@@ -918,7 +941,7 @@ def train(cfg):
     print(f"\ndevice         = {device} | optimizer = {cfg.optimizer} | amp = {cfg.use_amp}")
 
     #encode the whole corpus once, then split + wrap in DataLoaders
-    tokens = encode_corpus(cfg.textsource, tokenizer)
+    tokens = encode_corpus(cfg.textsource, tokenizer, cache_path=cfg.encoded_tokens_cache)
     print(f"corpus tokens  = {len(tokens)}", flush=True)
     train_loader, val_loader = make_loaders(tokens, cfg)
 
