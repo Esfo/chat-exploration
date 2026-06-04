@@ -136,6 +136,10 @@ class Config:
 
     #=== architecture options ===
 
+    #optional path to cache the tokenised corpus (a .pt file). the first run
+    #writes it; later runs load it instantly instead of re-tokenising. "" = off.
+    token_cache: str = ""
+
     #use rotary position encoding (RoPE) instead of a learned position-embedding
     #table. RoPE rotates the query/key vectors by an amount that depends on each
     #token's position, so position is baked into attention itself. requires an
@@ -199,9 +203,22 @@ class VocabTokenizer:
     #stop codon
     eos_id: int = 1
 
+    def __post_init__(self):
+        #lookup structures for fast longest-match encoding (built once):
+        #  a set for O(1) "is this substring a token?" tests, and the distinct
+        #  token lengths in descending order so we try the longest first.
+        self._token_set = set(self.match_tokens)
+        self._match_lengths = sorted({len(token) for token in self.match_tokens}, reverse=True)
+
     def encode(self, text):
         """
         convert raw text into token IDs.
+
+        at each position we try the possible token lengths from longest to
+        shortest and take the first substring that is a real token. this gives
+        the same longest-match result as scanning the whole vocabulary, but
+        costs O(number of distinct lengths) per position instead of O(vocab),
+        which is the difference between seconds and many minutes on a big corpus.
         """
 
         #list of integer IDs produced by the tokenizer
@@ -209,8 +226,9 @@ class VocabTokenizer:
 
         #position inside the text string
         i = 0
+        n = len(text)
 
-        while i < len(text):
+        while i < n:
             #skip whitespace between token strings
             if text[i].isspace():
                 i += 1
@@ -220,9 +238,10 @@ class VocabTokenizer:
 
             #match the longest token string found at this position
             #this lets 'ing' become one token instead of 'i' + 'n' + 'g'
-            for token in self.match_tokens:
-                if text.startswith(token, i):
-                    match = token
+            for length in self._match_lengths:
+                candidate = text[i:i + length]
+                if candidate in self._token_set:
+                    match = candidate
                     break
 
             if match is None:
@@ -310,18 +329,37 @@ def build_tokenizer_from_jsonl(path):
     )
 
 
-def encode_corpus(textsource, tokenizer):
+def encode_corpus(textsource, tokenizer, cache_path=""):
     """
     read the whole corpus once and flatten it into a single 1-D tensor of token
     IDs (paragraphs separated by the EOS that encode() appends).
 
     doing this once up front - instead of re-tokenising while training - lets the
     DataLoader hand out chunks cheaply from many worker processes at once.
+
+    because tokenising a large corpus takes a while, progress is printed as it
+    goes (so it never looks frozen), and the result can be cached to cache_path
+    so later runs load it instantly instead of re-tokenising.
     """
 
+    #reuse a previously cached encoding if one exists
+    if cache_path and os.path.exists(cache_path):
+        print(f"loading cached token corpus from {cache_path}", flush=True)
+        return torch.load(cache_path)
+
+    print("tokenising corpus (one-time)... ", flush=True)
     all_ids = []
-    for paragraph in read_paragraphs(textsource):
+    start = time.time()
+    for n_paragraphs, paragraph in enumerate(read_paragraphs(textsource), start=1):
         all_ids.extend(tokenizer.encode(paragraph))
+
+        #periodic heartbeat so a long tokenise is visibly progressing
+        if n_paragraphs % 1000 == 0:
+            print(
+                f"  {n_paragraphs} paragraphs -> {len(all_ids)} tokens "
+                f"({time.time() - start:.1f}s)",
+                flush=True,
+            )
 
     if len(all_ids) < 2:
         raise ValueError(
@@ -330,7 +368,17 @@ def encode_corpus(textsource, tokenizer):
         )
 
     #int32 is plenty for vocab sizes here and halves the memory of int64
-    return torch.tensor(all_ids, dtype=torch.int32)
+    tokens = torch.tensor(all_ids, dtype=torch.int32)
+    print(f"tokenised {len(tokens)} tokens in {time.time() - start:.1f}s", flush=True)
+
+    if cache_path:
+        directory = os.path.dirname(cache_path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        torch.save(tokens, cache_path)
+        print(f"cached token corpus to {cache_path}", flush=True)
+
+    return tokens
 
 
 class ChunkDataset(Dataset):
@@ -889,7 +937,7 @@ def train(cfg):
     print(f"\ndevice         = {device} | optimizer = {cfg.optimizer} | amp = {cfg.use_amp}")
 
     #encode the whole corpus once, then split + wrap in DataLoaders
-    tokens = encode_corpus(cfg.textsource, tokenizer)
+    tokens = encode_corpus(cfg.textsource, tokenizer, cache_path=cfg.token_cache)
     print(f"corpus tokens  = {len(tokens)}", flush=True)
     train_loader, val_loader = make_loaders(tokens, cfg)
 
