@@ -26,13 +26,14 @@ training = True
 #training = False
 
 #number of tokens per training chunk
-context_length = 128
+#shorter context = cheaper attention and faster steps for a quick small model
+context_length = 64
 
 #width of the model's internal token vector
 d_model = 256
 
 #number of transformer blocks
-n_layers = 2
+n_layers = 3
 
 #width of one attention head (n_heads = d_model / head_dim)
 head_dim = 64
@@ -56,7 +57,7 @@ use_rope = True
 use_swiglu = True
 
 #number of chunks trained together in one update
-batch_size = 8
+batch_size = 64
 
 #how large each training update is (the peak LR the schedule warms up to).
 #adamw likes a much smaller LR than plain gradient descent did; ~3e-4 is a
