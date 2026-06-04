@@ -142,6 +142,11 @@ class Config:
     #even head_dim. when True the learned pos_emb table is unused.
     use_rope: bool = False
 
+    #use a SwiGLU gated MLP instead of the plain GELU MLP in each block. it's the
+    #modern standard (Llama/Mistral) and tends to give a small quality bump; the
+    #cost is one extra projection per block (slightly more params/compute).
+    use_swiglu: bool = False
+
     #number of possible token IDs
         #this gets set after the tokenizer builds the vocabulary from tokenpath
         #+ 1 padding token
@@ -457,6 +462,7 @@ class Block(nn.Module):
         super().__init__()
         self.n_heads = cfg.n_heads
         self.head_dim = cfg.head_dim
+        self.use_swiglu = cfg.use_swiglu
 
         self.ln1 = nn.LayerNorm(cfg.d_model)
         #fused query/key/value projection: one matmul instead of three
@@ -464,8 +470,22 @@ class Block(nn.Module):
         self.proj = nn.Linear(cfg.d_model, cfg.d_model)
 
         self.ln2 = nn.LayerNorm(cfg.d_model)
-        self.fc1 = nn.Linear(cfg.d_model, cfg.d_ff)
-        self.fc2 = nn.Linear(cfg.d_ff, cfg.d_model)
+        if cfg.use_swiglu:
+            #SwiGLU: two input projections (a "gate" and an "up"), combined as
+            #silu(gate) * up, then projected back down. the gate lets the block
+            #learn which features to let through, which plain GELU can't.
+            self.fc_gate = nn.Linear(cfg.d_model, cfg.d_ff)
+            self.fc_up = nn.Linear(cfg.d_model, cfg.d_ff)
+            self.fc_down = nn.Linear(cfg.d_ff, cfg.d_model)
+        else:
+            #plain MLP: expand, GELU, shrink back
+            self.fc1 = nn.Linear(cfg.d_model, cfg.d_ff)
+            self.fc2 = nn.Linear(cfg.d_ff, cfg.d_model)
+
+    def mlp(self, x):
+        if self.use_swiglu:
+            return self.fc_down(F.silu(self.fc_gate(x)) * self.fc_up(x))
+        return self.fc2(F.gelu(self.fc1(x)))
 
     def attention(self, x, rope):
         batch_size, seq_len, d_model = x.shape
@@ -495,8 +515,8 @@ class Block(nn.Module):
     def forward(self, x, rope):
         #residual + attention over a normalised input
         x = x + self.attention(self.ln1(x), rope)
-        #residual + MLP (GELU is the standard transformer activation) over a normalised input
-        x = x + self.fc2(F.gelu(self.fc1(self.ln2(x))))
+        #residual + MLP (SwiGLU or plain GELU) over a normalised input
+        x = x + self.mlp(self.ln2(x))
         return x
 
 
@@ -667,16 +687,21 @@ def generate(
     temperature=0.8,
     top_k=40,
     top_p=0.95,
+    repetition_penalty=1.1,
     device=None,
 ):
     """
     generate text after training, with proper sampling controls:
 
-      temperature - <1 sharpens (more confident), >1 flattens (more random).
-                    set to 0 for greedy (always the most likely token).
-      top_k       - only sample from the k most likely tokens (0 = disabled).
-      top_p       - nucleus sampling: keep the smallest set of tokens whose
-                    probability sums to top_p (0 = disabled).
+      temperature        - <1 sharpens (more confident), >1 flattens (more
+                           random). set to 0 for greedy (always the most likely
+                           token).
+      top_k              - only sample from the k most likely tokens (0 = off).
+      top_p              - nucleus sampling: keep the smallest set of tokens
+                           whose probability sums to top_p (0 = off).
+      repetition_penalty - >1 discourages repeating tokens already generated,
+                           which stops small models looping ("the the the").
+                           1.0 = off; ~1.1-1.3 is a typical range.
     """
 
     if device is None:
@@ -693,6 +718,16 @@ def generate(
         logits, _ = model(x)
         #use only the final position to pick the next token
         next_logits = logits[0, -1]
+
+        #repetition penalty: push down the score of tokens we've already emitted.
+        #divide positive logits / multiply negative ones so the penalty always
+        #moves a token toward "less likely" regardless of its sign.
+        if repetition_penalty and repetition_penalty != 1.0:
+            for token_id in set(ids):
+                if next_logits[token_id] > 0:
+                    next_logits[token_id] /= repetition_penalty
+                else:
+                    next_logits[token_id] *= repetition_penalty
 
         #greedy when temperature is 0
         if not temperature:
@@ -742,6 +777,7 @@ _SAVED_CONFIG_FIELDS = (
     "learning_rate",
     "vocab_size",
     "use_rope",
+    "use_swiglu",
 )
 
 
@@ -796,8 +832,9 @@ def load_model(path, device="cpu"):
         batch_size=config_meta["batch_size"],
         learning_rate=config_meta["learning_rate"],
         log_every=1,
-        #default False keeps models saved before RoPE existed loadable
+        #.get(...) defaults keep models saved before these options existed loadable
         use_rope=config_meta.get("use_rope", False),
+        use_swiglu=config_meta.get("use_swiglu", False),
         vocab_size=config_meta["vocab_size"],
     )
 
@@ -848,6 +885,7 @@ def train(cfg):
     print(f"mlp_size       = {cfg.d_model} × {cfg.d_ff}")
     print(f"total_blocks   = {cfg.n_layers}")
     print(f"position_enc   = {'RoPE' if cfg.use_rope else 'learned'}")
+    print(f"mlp_type       = {'SwiGLU' if cfg.use_swiglu else 'GELU'}")
     print(f"\ndevice         = {device} | optimizer = {cfg.optimizer} | amp = {cfg.use_amp}")
 
     #encode the whole corpus once, then split + wrap in DataLoaders

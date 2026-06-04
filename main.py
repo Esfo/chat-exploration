@@ -45,6 +45,10 @@ mlp_multiplier = 4.0
 #better, and needs no position table. requires head_dim to be even.
 use_rope = True
 
+#use a SwiGLU gated MLP instead of the plain GELU MLP. modern standard, small
+#quality bump, slightly more params/compute per block. set False for plain GELU.
+use_swiglu = True
+
 #number of chunks trained together in one update
 batch_size = 8
 
@@ -143,6 +147,7 @@ if training:
         head_dim=head_dim,
         mlp_multiplier=mlp_multiplier,
         use_rope=use_rope,
+        use_swiglu=use_swiglu,
         #paths come from this gateway, not from training.py
         tokenpath=str(tokensfile),
         textsource=textsource,

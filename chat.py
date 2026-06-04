@@ -43,6 +43,8 @@ def main():
                         help="sample only from the k most likely tokens (0 = off)")
     parser.add_argument("--top-p", type=float, default=0.95,
                         help="nucleus sampling cutoff (0 = off)")
+    parser.add_argument("--repetition-penalty", type=float, default=1.1,
+                        help="discourage repeating tokens; >1 stronger, 1.0 = off")
 
     #the model stores the tokenpath it was trained with; this overrides it in
     #case the token file has moved since training.
@@ -88,6 +90,9 @@ def main():
     print(f"loaded model from {args.model}")
     print(f"vocab_size={cfg.vocab_size} context_length={cfg.context_length} "
           f"d_model={cfg.d_model} n_layers={cfg.n_layers}")
+    print(f"position_enc={'RoPE' if cfg.use_rope else 'learned'} "
+          f"mlp={'SwiGLU' if cfg.use_swiglu else 'GELU'} "
+          f"device={next(model.parameters()).device}")
     print("type a prompt and press enter. ctrl-c or empty line + enter to quit.\n")
 
     while True:
@@ -110,6 +115,7 @@ def main():
             temperature=args.temperature,
             top_k=args.top_k,
             top_p=args.top_p,
+            repetition_penalty=args.repetition_penalty,
         )
         print(f"model> {text}\n")
 
