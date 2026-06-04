@@ -1,23 +1,24 @@
-from word_survival import word_survival
+from bpe import train as train_tokenizer
 from training import Config, train
 
 
-#=== token survival config ===
+#=== tokenizer (BPE) config ===
 
-#how many consecutive rounds a leaf may sit at score 0 (absent) before it dies. a leaf
-#gains +1 when it appears and loses 1 when absent; once its score hits 0, this is the
-#grace period of further absences it gets before being removed.
-survivalrounds = 1
-
+#corpus the tokenizer is learned from and the model trains on
 textsource = '/home/sfo/store/gutenberg/gutenbooks/'
 
-tokenoutput = '/home/sfo/data/models/tokens/text-chunks.jsonl'
-tokenoutput = False
+#how many tokens the BPE vocabulary should aim for. bigger = words stay whole
+#(fewer fragments, shorter sequences) but larger embedding/output tables.
+#~8k is a sensible middle for a corpus this size.
+vocab_size = 8000
 
-tokeninput = '/home/sfo/data/models/tokens/text-chunks.jsonl'
+#train a fresh tokenizer and save it to this path. set to False to skip training
+#and just load an existing one from tokeninput below.
+tokenoutput = '/home/sfo/data/models/tokens/bpe.json'
+#tokenoutput = False
 
-coveragetest = True
-#coveragetest = False
+#existing tokenizer to load when tokenoutput is False.
+tokeninput = '/home/sfo/data/models/tokens/bpe.json'
 
 
 #=== training config ===
@@ -147,11 +148,14 @@ val_batches = 20
 
 def run():
     if tokenoutput:
-        tokensfile = word_survival(textsource, tokenoutput, survivalrounds, coveragetest)
-        print('tokens written to', tokensfile)
+        print(f'training BPE tokenizer (vocab_size={vocab_size})...')
+        tokenizer = train_tokenizer(textsource, vocab_size)
+        tokenizer.save(tokenoutput)
+        tokensfile = tokenoutput
+        print(f'tokenizer ({tokenizer.vocab_size} tokens) written to {tokensfile}')
     else:
         tokensfile = tokeninput
-        print('using existing tokens at', tokensfile)
+        print('using existing tokenizer at', tokensfile)
 
     if not training:
         print('training disabled')

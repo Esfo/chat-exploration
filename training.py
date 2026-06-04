@@ -10,6 +10,7 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
 from read_paragraphs import read_paragraphs
+from bpe import BPETokenizer
 
 
 @dataclass
@@ -176,189 +177,6 @@ class Config:
         """
 
         return int(self.d_model * self.mlp_multiplier)
-
-
-@dataclass
-class VocabTokenizer:
-    """
-    converts token text into token IDs.
-    """
-
-    #maps each token string to one token ID
-    token_to_id: dict
-
-    #maps each token ID back to one token string
-    id_to_token: dict
-
-    #tokens sorted longest-first so multi-character tokens are matched before shorter tokens
-    match_tokens: list
-
-    #number of possible token IDs
-    vocab_size: int
-
-    #not actively used here because chunks are always exactly context_length tokens
-    #reserved so token ID 0 never means a real token
-    #would be used to fill shorter examples if you later train variable-length chunks
-    pad_id: int = 0
-
-    #stop codon
-    eos_id: int = 1
-
-    #explicit word-boundary token. the corpus tokens are subword pieces with no
-    #built-in spacing, so we emit this between tokens that were separated by
-    #whitespace in the source. without it, word boundaries are lost and decode
-    #can't tell "be"+"tte"+"r" (one word) from "the"+"better" (two words).
-    space_id: int = 2
-
-    def __post_init__(self):
-        #lookup structures for fast longest-match encoding (built once):
-        #  a set for O(1) "is this substring a token?" tests, and the distinct
-        #  token lengths in descending order so we try the longest first.
-        self._token_set = set(self.match_tokens)
-        self._match_lengths = sorted({len(token) for token in self.match_tokens}, reverse=True)
-
-    def encode(self, text):
-        """
-        convert raw text into token IDs.
-
-        at each position we try the possible token lengths from longest to
-        shortest and take the first substring that is a real token. this gives
-        the same longest-match result as scanning the whole vocabulary, but
-        costs O(number of distinct lengths) per position instead of O(vocab),
-        which is the difference between seconds and many minutes on a big corpus.
-
-        whitespace between tokens is recorded as a single space_id, so decode can
-        rebuild word boundaries instead of guessing.
-        """
-
-        #list of integer IDs produced by the tokenizer
-        token_ids = []
-
-        #position inside the text string
-        i = 0
-        n = len(text)
-
-        #whether we've passed whitespace since the last real token was emitted
-        pending_space = False
-
-        while i < n:
-            #whitespace marks a word boundary; remember it but don't emit yet
-            if text[i].isspace():
-                pending_space = True
-                i += 1
-                continue
-
-            match = None
-
-            #match the longest token string found at this position
-            #this lets 'ing' become one token instead of 'i' + 'n' + 'g'
-            for length in self._match_lengths:
-                candidate = text[i:i + length]
-                if candidate in self._token_set:
-                    match = candidate
-                    break
-
-            if match is None:
-                raise ValueError(f"unknown token near: {text[i:i + 30]!r}")
-
-            #emit one space token for the whitespace run that preceded this token
-            #(but not at the very start, so text doesn't begin with a space)
-            if pending_space and token_ids:
-                token_ids.append(self.space_id)
-            pending_space = False
-
-            #append this token's fixed vocabulary ID
-            token_ids.append(self.token_to_id[match])
-
-            #move forward by the length of the matched token string
-            i += len(match)
-
-        token_ids.append(self.eos_id)
-
-        return token_ids
-
-    def decode(self, token_ids):
-        """
-        convert token IDs back into text.
-
-        within-word pieces are concatenated directly; the space_id is rendered as
-        a real space, so 'be'+'tte'+'r' -> 'better' and 'the'+SP+'cat' -> 'the cat'.
-        """
-
-        out = []
-
-        for token_id in token_ids:
-            token_id = int(token_id)
-
-            #drop padding / end-of-text markers entirely
-            if token_id == self.pad_id or token_id == self.eos_id:
-                continue
-
-            #the word-boundary token becomes an actual space
-            if token_id == self.space_id:
-                out.append(" ")
-                continue
-
-            out.append(self.id_to_token[token_id])
-
-        #pieces already carry their own spacing via space_id, so join with nothing
-        return "".join(out)
-
-
-def build_tokenizer_from_jsonl(path):
-    """
-    build tokenizer vocabulary from a JSONL file.
-    """
-
-    #start with special token IDs (must match VocabTokenizer's pad/eos/space ids)
-    token_to_id = {
-        "<PAD>": 0,
-        "<EOS>": 1,
-        "<SP>": 2,
-    }
-
-    #word_survival writes one surviving token per line, each line a JSON-encoded
-    #string (serde_json::to_string), e.g. "ing" — not an object with a 'text' field
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-
-            if line == "":
-                continue
-
-            #each line decodes to exactly one token string
-            #don't split on whitespace: a token may itself be punctuation/whitespace
-            token = json.loads(line)
-
-            if token == "":
-                continue
-
-            if token not in token_to_id:
-                token_to_id[token] = len(token_to_id)
-
-    #reverse lookup for decode()
-    id_to_token = {
-        token_id: token
-        for token, token_id in token_to_id.items()
-    }
-
-    #longest-first matching prevents shorter tokens from stealing the start of longer tokens
-    match_tokens = sorted(
-        [
-            token
-            for token in token_to_id
-            if token not in ("<PAD>", "<EOS>", "<SP>")
-        ],
-        key=len,
-        reverse=True,
-    )
-
-    return VocabTokenizer(
-        token_to_id=token_to_id,
-        id_to_token=id_to_token,
-        match_tokens=match_tokens,
-        vocab_size=len(token_to_id),
-    )
 
 
 #paragraph tokenising is pure-Python and CPU-bound, so it parallelises well
@@ -1008,7 +826,7 @@ def train(cfg):
     #store the resolved name back so the DataLoader's pin_memory decision is right
     cfg.device = device.type
 
-    tokenizer = build_tokenizer_from_jsonl(cfg.tokenpath)
+    tokenizer = BPETokenizer.load(cfg.tokenpath)
 
     #vocab_size must match the tokenizer because it controls:
         #token embedding rows

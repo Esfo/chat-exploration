@@ -11,7 +11,7 @@ answer it conversationally.
 
 usage:
     python chat.py /home/sfo/data/models/model.pt
-    python chat.py /home/sfo/data/models/model.pt --tokens /path/to/tokens.jsonl
+    python chat.py /home/sfo/data/models/model.pt --tokens /path/to/bpe.json
     python chat.py /home/sfo/data/models/model.pt --max-new-tokens 60
     python chat.py /home/sfo/data/models/model.pt --temperature 0.7 --top-k 40 --top-p 0.95
 """
@@ -19,7 +19,8 @@ usage:
 import argparse
 import os
 
-from training import load_model, build_tokenizer_from_jsonl, generate
+from training import load_model, generate
+from bpe import BPETokenizer
 
 
 def main():
@@ -51,7 +52,7 @@ def main():
     parser.add_argument(
         "--tokens",
         default=None,
-        help="override path to the tokenizer JSONL (defaults to the one saved "
+        help="override path to the tokenizer JSON (defaults to the one saved "
              "with the model)",
     )
 
@@ -73,13 +74,13 @@ def main():
     if not tokenpath or not os.path.exists(tokenpath):
         raise SystemExit(
             f"tokenizer file not found at {tokenpath!r}. "
-            "pass --tokens with the path to the token JSONL."
+            "pass --tokens with the path to the tokenizer JSON."
         )
 
-    tokenizer = build_tokenizer_from_jsonl(tokenpath)
+    tokenizer = BPETokenizer.load(tokenpath)
 
     #the model's output head is sized to the vocab it trained on; a mismatched
-    #token file would produce nonsense / index errors.
+    #tokenizer would produce nonsense / index errors.
     if tokenizer.vocab_size != cfg.vocab_size:
         raise SystemExit(
             f"tokenizer vocab_size ({tokenizer.vocab_size}) does not match the "
