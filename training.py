@@ -3,6 +3,7 @@ import numpy as np
 import math
 import json
 import time
+import os
 
 from read_paragraphs import read_paragraphs
 
@@ -45,11 +46,30 @@ class Config:
     #how large each training update is
     learning_rate: float
 
-    #number of training steps to run
-    train_steps: int
-
     #how often (in steps) to print the training loss to stdout
     log_every: int
+
+    #where to write the trained model.
+    #the model is saved here on the periodic checkpoint, when the loss target is
+    #reached, and if training is interrupted (ctrl-c).
+    #set to a path like 'model.npz' to save; leave as "" / False to skip saving.
+    model_output: str = ""
+
+    #path to an existing saved model to continue training from.
+    #leave as "" / False to start from fresh random weights.
+    resume_from: str = ""
+
+    #early-stopping target. training runs until the average loss over the last
+    #target_window steps drops to or below this value (there is no fixed step
+    #count). set target_loss to 0 / False to train forever until interrupted.
+    target_loss: float = 0.1
+
+    #how many recent steps the average is taken over when checking target_loss.
+    target_window: int = 100
+
+    #save a checkpoint to model_output every this many steps, so progress
+    #survives a crash or interruption even between the start and the target.
+    checkpoint_every: int = 200
 
     #number of possible token IDs
         #this gets set after the tokenizer builds the vocabulary from tokenpath
@@ -759,6 +779,85 @@ def generate(prompt, tokenizer, p, cfg, max_new_tokens=100):
     return tokenizer.decode(ids)
 
 
+#config fields that describe the model architecture / data and must be saved
+#alongside the weights so the model can be rebuilt for resuming or inference.
+#train_steps / log_every / model_output / resume_from / target_loss are run
+#controls, not part of the model, so they are intentionally left out.
+_SAVED_CONFIG_FIELDS = (
+    "context_length",
+    "d_model",
+    "n_layers",
+    "head_dim",
+    "mlp_multiplier",
+    "tokenpath",
+    "textsource",
+    "batch_size",
+    "learning_rate",
+    "vocab_size",
+)
+
+
+def save_model(path, p, cfg):
+    """
+    save trained weights plus the architecture config to a single .npz file.
+
+    the config travels with the weights so inference/resume never has to guess
+    the shapes the weights were trained with.
+    """
+
+    #every parameter array becomes one entry under its own name
+    arrays = {f"param.{name}": value for name, value in p.items()}
+
+    #pack the architecture config as a JSON string stored in a 0-d array
+    config_meta = {field: getattr(cfg, field) for field in _SAVED_CONFIG_FIELDS}
+    arrays["config_json"] = np.array(json.dumps(config_meta))
+
+    #make sure the destination directory exists before writing
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+
+    np.savez(path, **arrays)
+    print(f"model saved to {path}", flush=True)
+
+
+def load_model(path):
+    """
+    load weights and config previously written by save_model.
+
+    returns (p, cfg) where p is the parameter dict and cfg is a Config rebuilt
+    from the saved architecture fields. run controls (train_steps, etc.) are
+    left at their defaults for the caller to set.
+    """
+
+    data = np.load(path, allow_pickle=True)
+
+    #rebuild the parameter dict, stripping the "param." prefix
+    p = {
+        key[len("param."):]: data[key]
+        for key in data.files
+        if key.startswith("param.")
+    }
+
+    #rebuild the architecture config
+    config_meta = json.loads(str(data["config_json"]))
+    cfg = Config(
+        context_length=config_meta["context_length"],
+        d_model=config_meta["d_model"],
+        n_layers=config_meta["n_layers"],
+        head_dim=config_meta["head_dim"],
+        mlp_multiplier=config_meta["mlp_multiplier"],
+        tokenpath=config_meta["tokenpath"],
+        textsource=config_meta["textsource"],
+        batch_size=config_meta["batch_size"],
+        learning_rate=config_meta["learning_rate"],
+        log_every=1,
+        vocab_size=config_meta["vocab_size"],
+    )
+
+    return p, cfg
+
+
 def train(cfg):
     """
     main training loop
@@ -799,8 +898,22 @@ def train(cfg):
     print(f"mlp_size       = {cfg.d_model} × {cfg.d_ff}")
     print(f"total_blocks   = {cfg.n_layers}")
 
-    #initialize trainable weights
-    p = init_params(cfg)
+    #either continue from a saved model or start from fresh random weights.
+    if cfg.resume_from:
+        print(f"\nresuming from {cfg.resume_from}", flush=True)
+        p, saved_cfg = load_model(cfg.resume_from)
+
+        #the loaded weights only make sense if the vocabulary matches, otherwise
+        #the embedding table and output head have the wrong number of rows/columns.
+        if saved_cfg.vocab_size != cfg.vocab_size:
+            raise ValueError(
+                f"saved model vocab_size ({saved_cfg.vocab_size}) does not match "
+                f"current tokenizer vocab_size ({cfg.vocab_size}). "
+                "use the same tokenpath the model was trained with."
+            )
+    else:
+        #initialize trainable weights
+        p = init_params(cfg)
 
     #streaming batch generator
     #it yields:
@@ -817,32 +930,82 @@ def train(cfg):
     #moving, not frozen)
     last_log_time = time.time()
 
-    for step in range(1, cfg.train_steps + 1):
-        x, y = next(batches)
+    #rolling window of the most recent losses. training stops once the average
+    #across a full window of target_window steps drops to/below target_loss.
+    #a deque with maxlen automatically drops the oldest loss as new ones arrive.
+    from collections import deque
+    recent_losses = deque(maxlen=cfg.target_window)
 
-        #forward: make predictions
-        logits, h, caches = forward(x, p, cfg)
+    #there is no fixed step count anymore: count up forever and stop on either
+    #the loss target or an interruption (ctrl-c).
+    step = 0
 
-        #backward: calculate loss and gradients.
-        loss, grads = backward(x, y, logits, h, caches, p, cfg)
+    #wrap the loop so an interruption still saves progress instead of losing it.
+    try:
+        while True:
+            step += 1
 
-        #optimizer: update weights using raw gradients
-        gradient_descent_update(
-            p=p,
-            grads=grads,
-            lr=cfg.learning_rate,
-        )
+            x, y = next(batches)
 
-        #print the starting loss (step 1) so the baseline the descent works
-        #down from is visible, then print every log_every steps after that.
-        #flush=True so the loss appears live even when stdout is piped/redirected.
-        #the per-step seconds make it obvious training is progressing (and how fast).
-        if step == 1 or step % cfg.log_every == 0:
-            now = time.time()
-            steps_since = step if step == 1 else cfg.log_every
-            per_step = (now - last_log_time) / max(1, steps_since)
-            last_log_time = now
-            print(f"step={step} loss={loss:.4f} ({per_step:.2f}s/step)", flush=True)
+            #forward: make predictions
+            logits, h, caches = forward(x, p, cfg)
+
+            #backward: calculate loss and gradients.
+            loss, grads = backward(x, y, logits, h, caches, p, cfg)
+
+            #optimizer: update weights using raw gradients
+            gradient_descent_update(
+                p=p,
+                grads=grads,
+                lr=cfg.learning_rate,
+            )
+
+            #track this loss for the rolling average
+            recent_losses.append(loss)
+
+            #print the starting loss (step 1) so the baseline the descent works
+            #down from is visible, then print every log_every steps after that.
+            #flush=True so the loss appears live even when stdout is piped/redirected.
+            #the per-step seconds make it obvious training is progressing (and how fast).
+            if step == 1 or step % cfg.log_every == 0:
+                now = time.time()
+                steps_since = step if step == 1 else cfg.log_every
+                per_step = (now - last_log_time) / max(1, steps_since)
+                last_log_time = now
+                avg = sum(recent_losses) / len(recent_losses)
+                print(
+                    f"step={step} loss={loss:.4f} "
+                    f"avg{len(recent_losses)}={avg:.4f} ({per_step:.2f}s/step)",
+                    flush=True,
+                )
+
+            #periodic checkpoint so progress survives a crash/interruption even
+            #before the loss target is reached.
+            if cfg.model_output and step % cfg.checkpoint_every == 0:
+                save_model(cfg.model_output, p, cfg)
+
+            #early stop: only once we have a full window of recent losses, check
+            #whether their average has reached the target.
+            if (
+                cfg.target_loss
+                and len(recent_losses) == cfg.target_window
+                and sum(recent_losses) / cfg.target_window <= cfg.target_loss
+            ):
+                avg = sum(recent_losses) / cfg.target_window
+                print(
+                    f"average loss over last {cfg.target_window} steps "
+                    f"({avg:.4f}) reached target {cfg.target_loss} at step "
+                    f"{step}, stopping",
+                    flush=True,
+                )
+                break
+    except KeyboardInterrupt:
+        #ctrl-c: stop training but keep what we have
+        print(f"\ninterrupted at step {step}", flush=True)
+
+    #persist the final weights so they can be reused for inference or resumed.
+    if cfg.model_output:
+        save_model(cfg.model_output, p, cfg)
 
     print(generate("", tokenizer, p, cfg))
 

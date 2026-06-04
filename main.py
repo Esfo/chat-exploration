@@ -46,11 +46,28 @@ batch_size = 8
 #how large each training update is
 learning_rate = 0.5
 
-#number of training steps to run
-train_steps = 2000
-
 #how often (in steps) to print the training loss to stdout
 log_every = 1
+
+#where to save the trained model.
+#saved on the periodic checkpoint, when the loss target is reached, and on
+#interruption (ctrl-c). set to False to skip saving entirely.
+model_output = '/home/sfo/data/models/model.npz'
+#model_output = False
+
+#path to an existing saved model to continue training from.
+#set to a saved .npz path to resume; False to start from fresh random weights.
+resume_from = False
+#resume_from = '/home/sfo/data/models/model.npz'
+
+#early-stopping target: training runs (no fixed step count) until the average
+#loss over the last target_window steps drops to/below target_loss.
+#set target_loss to False to train forever until interrupted.
+target_loss = 0.1
+target_window = 100
+
+#save a checkpoint every this many steps so progress survives a crash.
+checkpoint_every = 200
 
 
 #=== pipeline ===
@@ -74,8 +91,13 @@ if training:
         textsource=textsource,
         batch_size=batch_size,
         learning_rate=learning_rate,
-        train_steps=train_steps,
         log_every=log_every,
+        #saving / resuming / early-stop are all optional; False disables each.
+        model_output=str(model_output) if model_output else "",
+        resume_from=str(resume_from) if resume_from else "",
+        target_loss=float(target_loss) if target_loss else 0.0,
+        target_window=target_window,
+        checkpoint_every=checkpoint_every,
     )
     train(cfg)
 else:
