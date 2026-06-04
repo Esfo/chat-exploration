@@ -43,22 +43,24 @@ mlp_multiplier = 4.0
 #number of chunks trained together in one update
 batch_size = 8
 
-#how large each training update is
-learning_rate = 0.5
+#how large each training update is (the peak LR the schedule warms up to).
+#adamw likes a much smaller LR than plain gradient descent did; ~3e-4 is a
+#sane default. if you switch optimizer to 'sgd', raise this a lot (e.g. 0.5).
+learning_rate = 3e-4
 
 #how often (in steps) to print the training loss to stdout
-log_every = 1
+log_every = 10
 
 #where to save the trained model.
 #saved on the periodic checkpoint, when the loss target is reached, and on
 #interruption (ctrl-c). set to False to skip saving entirely.
-model_output = '/home/sfo/data/models/model.npz'
+model_output = '/home/sfo/data/models/model.pt'
 #model_output = False
 
 #path to an existing saved model to continue training from.
-#set to a saved .npz path to resume; False to start from fresh random weights.
+#set to a saved .pt path to resume; False to start from fresh random weights.
 resume_from = False
-#resume_from = '/home/sfo/data/models/model.npz'
+#resume_from = '/home/sfo/data/models/model.pt'
 
 #early-stopping target: training runs (no fixed step count) until the average
 #loss over the last target_window steps drops to/below target_loss.
@@ -68,6 +70,55 @@ target_window = 100
 
 #save a checkpoint every this many steps so progress survives a crash.
 checkpoint_every = 200
+
+
+#=== hardware / speed ===
+
+#where the model trains: 'auto' uses the GPU if one is visible, else the CPU.
+#force 'cuda' or 'cpu' to override.
+device = 'auto'
+
+#background worker processes that prepare batches in parallel while the GPU
+#trains. 0 loads in the main process. a handful of your CPU cores is a good
+#start (you have plenty). lower it if you hit memory pressure.
+num_workers = 8
+
+#mixed-precision training: do the heavy matmuls in fp16 on the GPU for ~2x
+#speed and less VRAM. ignored on CPU. set False to train in full fp32.
+use_amp = True
+
+
+#=== optimizer / schedule ===
+
+#'adamw' (recommended modern default) or 'sgd' (plain gradient descent, like
+#the original setup but far more sensitive to learning_rate).
+optimizer = 'adamw'
+
+#adamw weight decay (mild regularisation). ignored for sgd.
+weight_decay = 0.1
+
+#clip the global gradient norm to this before each step so one bad batch can't
+#blow the weights up. set to False to disable.
+grad_clip = 1.0
+
+#linear LR warmup: ramp 0 -> learning_rate over this many steps, then decay.
+warmup_steps = 100
+
+#cosine decay horizon: LR eases learning_rate -> min_lr over this many steps,
+#then holds at min_lr. set to False for a constant LR.
+lr_decay_steps = 5000
+min_lr = 1e-4
+
+
+#=== validation ===
+
+#fraction of the corpus held out (never trained on) to measure validation
+#loss. set to 0 to disable validation entirely.
+val_fraction = 0.05
+
+#run a validation pass every this many steps, averaging over val_batches.
+val_every = 200
+val_batches = 20
 
 
 #=== pipeline ===
@@ -98,6 +149,21 @@ if training:
         target_loss=float(target_loss) if target_loss else 0.0,
         target_window=target_window,
         checkpoint_every=checkpoint_every,
+        #hardware / speed
+        device=device,
+        num_workers=num_workers,
+        use_amp=use_amp,
+        #optimizer / schedule
+        optimizer=optimizer,
+        weight_decay=weight_decay,
+        grad_clip=float(grad_clip) if grad_clip else 0.0,
+        warmup_steps=warmup_steps,
+        lr_decay_steps=int(lr_decay_steps) if lr_decay_steps else 0,
+        min_lr=min_lr,
+        #validation
+        val_fraction=val_fraction,
+        val_every=val_every,
+        val_batches=val_batches,
     )
     train(cfg)
 else:

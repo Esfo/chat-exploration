@@ -1,0 +1,14 @@
+# training.py / chat.py now run on PyTorch (GPU-accelerated).
+#
+# Install the CUDA build of PyTorch so it uses your RTX 4050 instead of the CPU.
+# Pick the command for your CUDA version from https://pytorch.org/get-started/locally/
+# A current CUDA 12.x build (works on the 4050 / Ada GPUs):
+#
+#     pip install torch --index-url https://download.pytorch.org/whl/cu121
+#
+# Verify the GPU is visible after installing:
+#
+#     python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+#
+# (Plain `pip install torch` gives a CPU-only build that ignores the GPU.)
+torch>=2.1

@@ -1,7 +1,7 @@
 """
 interactive inference for a trained model.
 
-loads a model saved by training.save_model (an .npz written when model_output
+loads a model saved by training.save_model (a .pt written when model_output
 is set in main.py), rebuilds the tokenizer from the tokenpath that travelled
 with the model, and lets you chat with it from the terminal.
 
@@ -10,9 +10,10 @@ instruction-tuned assistant. it will continue whatever you type rather than
 answer it conversationally.
 
 usage:
-    python chat.py /home/sfo/data/models/model.npz
-    python chat.py /home/sfo/data/models/model.npz --tokens /path/to/tokens.jsonl
-    python chat.py /home/sfo/data/models/model.npz --max-new-tokens 60
+    python chat.py /home/sfo/data/models/model.pt
+    python chat.py /home/sfo/data/models/model.pt --tokens /path/to/tokens.jsonl
+    python chat.py /home/sfo/data/models/model.pt --max-new-tokens 60
+    python chat.py /home/sfo/data/models/model.pt --temperature 0.7 --top-k 40 --top-p 0.95
 """
 
 import argparse
@@ -26,8 +27,22 @@ def main():
 
     parser.add_argument(
         "model",
-        help="path to a saved model .npz (written when model_output is set)",
+        help="path to a saved model .pt (written when model_output is set)",
     )
+
+    parser.add_argument(
+        "--device",
+        default="auto",
+        help="where to run inference: auto (gpu if available), cuda, or cpu",
+    )
+
+    #sampling controls (see training.generate for what each does)
+    parser.add_argument("--temperature", type=float, default=0.8,
+                        help="softmax temperature; <1 sharper, >1 more random, 0 = greedy")
+    parser.add_argument("--top-k", type=int, default=40,
+                        help="sample only from the k most likely tokens (0 = off)")
+    parser.add_argument("--top-p", type=float, default=0.95,
+                        help="nucleus sampling cutoff (0 = off)")
 
     #the model stores the tokenpath it was trained with; this overrides it in
     #case the token file has moved since training.
@@ -47,8 +62,8 @@ def main():
 
     args = parser.parse_args()
 
-    #load weights + the architecture config saved alongside them
-    p, cfg = load_model(args.model)
+    #load the model + the architecture config saved alongside it
+    model, cfg = load_model(args.model, device=args.device)
 
     #figure out where the tokenizer lives: explicit override, else the path the
     #model was trained with.
@@ -86,7 +101,16 @@ def main():
         if prompt.strip() == "":
             break
 
-        text = generate(prompt, tokenizer, p, cfg, max_new_tokens=args.max_new_tokens)
+        text = generate(
+            prompt,
+            tokenizer,
+            model,
+            cfg,
+            max_new_tokens=args.max_new_tokens,
+            temperature=args.temperature,
+            top_k=args.top_k,
+            top_p=args.top_p,
+        )
         print(f"model> {text}\n")
 
 
