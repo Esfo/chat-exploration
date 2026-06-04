@@ -1,24 +1,30 @@
 """
-interactive inference for a trained model.
+interactive inference for a trained PyTorch model.
 
-loads a model saved by training.save_model (an .npz written when model_output
-is set in main.py), rebuilds the tokenizer from the tokenpath that travelled
-with the model, and lets you chat with it from the terminal.
+loads a checkpoint saved by training.save_model (a .pt file written when
+model_output is set in main.py), rebuilds the tokenizer from the tokenpath that
+travelled with the model, and lets you chat with it from the terminal.
 
 note: this is a small base language model trained to continue text, not an
 instruction-tuned assistant. it will continue whatever you type rather than
 answer it conversationally.
 
 usage:
-    python chat.py /home/sfo/data/models/model.npz
-    python chat.py /home/sfo/data/models/model.npz --tokens /path/to/tokens.jsonl
-    python chat.py /home/sfo/data/models/model.npz --max-new-tokens 60
+    python chat.py /home/sfo/data/models/model.pt
+    python chat.py /home/sfo/data/models/model.pt --tokens /path/to/tokens.jsonl
+    python chat.py /home/sfo/data/models/model.pt --max-new-tokens 60
+    python chat.py /home/sfo/data/models/model.pt --temperature 0.7 --top-k 40 --top-p 0.9
 """
 
 import argparse
 import os
 
-from training import load_model, build_tokenizer_from_jsonl, generate
+from training import (
+    build_tokenizer_from_jsonl,
+    generate,
+    load_model,
+    resolve_device,
+)
 
 
 def main():
@@ -26,7 +32,7 @@ def main():
 
     parser.add_argument(
         "model",
-        help="path to a saved model .npz (written when model_output is set)",
+        help="path to a saved PyTorch model .pt (written when model_output is set)",
     )
 
     #the model stores the tokenpath it was trained with; this overrides it in
@@ -34,21 +40,50 @@ def main():
     parser.add_argument(
         "--tokens",
         default=None,
-        help="override path to the tokenizer JSONL (defaults to the one saved "
-             "with the model)",
+        help="override path to the tokenizer JSONL (defaults to the one saved with the model)",
     )
-
+    parser.add_argument(
+        "--device",
+        default="auto",
+        choices=("auto", "cuda", "cpu"),
+        help="where to run inference (default: auto)",
+    )
     parser.add_argument(
         "--max-new-tokens",
         type=int,
-        default=100,
-        help="how many tokens to generate per reply (default: 100)",
+        default=None,
+        help="how many tokens to generate per reply (defaults to checkpoint config)",
+    )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=None,
+        help="sampling temperature; 0 means greedy (defaults to checkpoint config)",
+    )
+    parser.add_argument(
+        "--top-k",
+        type=int,
+        default=None,
+        help="keep only this many most likely tokens; 0 disables (defaults to checkpoint config)",
+    )
+    parser.add_argument(
+        "--top-p",
+        type=float,
+        default=None,
+        help="nucleus sampling probability mass; 1.0 disables (defaults to checkpoint config)",
+    )
+    parser.add_argument(
+        "--greedy",
+        action="store_true",
+        help="always choose the highest-logit token instead of sampling",
     )
 
     args = parser.parse_args()
 
-    #load weights + the architecture config saved alongside them
-    p, cfg = load_model(args.model)
+    device = resolve_device(args.device)
+    model, cfg, _ = load_model(args.model, map_location=device)
+    model.to(device)
+    model.eval()
 
     #figure out where the tokenizer lives: explicit override, else the path the
     #model was trained with.
@@ -71,8 +106,10 @@ def main():
         )
 
     print(f"loaded model from {args.model}")
-    print(f"vocab_size={cfg.vocab_size} context_length={cfg.context_length} "
-          f"d_model={cfg.d_model} n_layers={cfg.n_layers}")
+    print(
+        f"vocab_size={cfg.vocab_size} context_length={cfg.context_length} "
+        f"d_model={cfg.d_model} n_layers={cfg.n_layers} device={device}"
+    )
     print("type a prompt and press enter. ctrl-c or empty line + enter to quit.\n")
 
     while True:
@@ -86,7 +123,18 @@ def main():
         if prompt.strip() == "":
             break
 
-        text = generate(prompt, tokenizer, p, cfg, max_new_tokens=args.max_new_tokens)
+        text = generate(
+            prompt,
+            tokenizer,
+            model,
+            cfg,
+            max_new_tokens=args.max_new_tokens,
+            temperature=args.temperature,
+            top_k=args.top_k,
+            top_p=args.top_p,
+            greedy=args.greedy or None,
+            device=device,
+        )
         print(f"model> {text}\n")
 
 
