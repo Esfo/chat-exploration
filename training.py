@@ -1003,6 +1003,16 @@ def train(cfg):
     print(f"mlp_type       = {'SwiGLU' if cfg.use_swiglu else 'GELU'}")
     print(f"\ndevice         = {device} | optimizer = {cfg.optimizer} | amp = {cfg.use_amp}")
 
+    #make checkpointing status obvious up front so a silent "model_output = False"
+    #never looks like training that mysteriously saved nothing.
+    if cfg.model_output:
+        print(
+            f"checkpoints    = ON -> {cfg.model_output} "
+            f"(every {cfg.checkpoint_every} steps, plus on stop/interrupt)"
+        )
+    else:
+        print("checkpoints    = OFF (model_output is not set; nothing will be saved!)")
+
     #encode the whole corpus once, then split + wrap in DataLoaders
     tokens = encode_corpus(
         cfg.textsource,
