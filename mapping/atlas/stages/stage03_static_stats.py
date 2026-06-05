@@ -26,6 +26,7 @@ import numpy as np
 from .. import ids
 from ..manifest import Library
 from ..model_backend import ModelBackend
+from ..parallel import resolve_workers, thread_map
 from ..sketches import random_projection_matrix
 from ..storage import write_zarr_array
 from . import register
@@ -34,44 +35,56 @@ from . import register
 @register("static-analysis", 3,
           requires=["catalog/unit_index.parquet", "catalog/unit_weight_refs.parquet"],
           produces=["units/unit_static_stats.parquet", "units/unit_direction_sketches.zarr"])
-def run(library: Library, backend: ModelBackend, **kwargs):
+def run(library: Library, backend: ModelBackend, layer_workers: int = 0, **kwargs):
     config = library.config()
     arch = backend.architecture()
     proj = random_projection_matrix(arch.hidden_size, config.signature_dim, config.sketch_seed)
-
-    stat_rows: list[dict] = []
-    unit_ids: list[str] = []
-    read_sketches: list[np.ndarray] = []
-    write_sketches: list[np.ndarray] = []
 
     n_mlp = arch.intermediate_size
     if config.max_mlp_neurons_per_layer:
         n_mlp = min(n_mlp, config.max_mlp_neurons_per_layer)
     hd, n_heads = arch.head_dim, arch.num_attention_heads
 
-    for layer in range(arch.num_layers):
+    def process_layer(layer):
+        """All per-unit stats + sketches for one layer (mlp + heads).
+
+        Runs on a worker thread. The heavy elementwise NumPy reductions here
+        release the GIL, so processing layers concurrently actually uses multiple
+        cores — unlike the single-core elementwise path within one layer.
+        """
+        u_ids, rows, r_sk, w_sk = [], [], [], []
         if config.include_mlp_neurons:
             gate = backend.get_tensor(f"model.layers.{layer}.mlp.gate_proj.weight")
             down = backend.get_tensor(f"model.layers.{layer}.mlp.down_proj.weight")
-            #read rows = gate_proj rows; write rows = down_proj columns (transpose).
             read_mat = np.ascontiguousarray(gate[:n_mlp])            # [n_mlp, hidden]
             write_mat = np.ascontiguousarray(down[:, :n_mlp].T)      # [n_mlp, hidden]
             _emit_group(layer, "mlp_neuron", n_mlp, read_mat, write_mat, proj,
-                        config.signature_dim, stat_rows, unit_ids,
-                        read_sketches, write_sketches)
-            print(f"[static] layer {layer} mlp done ({n_mlp} neurons)", flush=True)
-
+                        config.signature_dim, rows, u_ids, r_sk, w_sk)
         if config.include_attention_heads:
             q = backend.get_tensor(f"model.layers.{layer}.self_attn.q_proj.weight")
             o = backend.get_tensor(f"model.layers.{layer}.self_attn.o_proj.weight")
-            #q_proj rows grouped by head -> mean over the head's hd rows.
             read_mat = q[: n_heads * hd].reshape(n_heads, hd, arch.hidden_size).mean(axis=1)
-            #o_proj columns grouped by head -> mean over the head's hd columns.
             write_mat = o[:, : n_heads * hd].reshape(arch.hidden_size, n_heads, hd).mean(axis=2).T
             _emit_group(layer, "attn_head", n_heads,
                         np.ascontiguousarray(read_mat), np.ascontiguousarray(write_mat),
-                        proj, config.signature_dim, stat_rows, unit_ids,
-                        read_sketches, write_sketches)
+                        proj, config.signature_dim, rows, u_ids, r_sk, w_sk)
+        print(f"[static] layer {layer} done", flush=True)
+        return u_ids, rows, r_sk, w_sk
+
+    #Each layer transiently holds ~1-2 GB of float64 work arrays, so cap the
+    #concurrency to bound memory rather than using all cores blindly.
+    workers = min(resolve_workers(layer_workers), 6)
+    per_layer = thread_map(process_layer, range(arch.num_layers), max_workers=workers)
+
+    stat_rows: list[dict] = []
+    unit_ids: list[str] = []
+    read_sketches: list[np.ndarray] = []
+    write_sketches: list[np.ndarray] = []
+    for u_ids, rows, r_sk, w_sk in per_layer:  # layer order preserved by thread_map
+        unit_ids.extend(u_ids)
+        stat_rows.extend(rows)
+        read_sketches.extend(r_sk)
+        write_sketches.extend(w_sk)
 
     library.commit_table("units/unit_static_stats.parquet", stat_rows, "units", "static-analysis")
     write_zarr_array(
