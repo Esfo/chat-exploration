@@ -40,7 +40,7 @@ def _classify(name: str) -> tuple[int, str, str, str]:
 @register("scan-tensors", 1, requires=["manifest/library.json"],
           produces=["catalog/tensor_index.parquet", "tensors/tensor_stats.parquet"])
 def run(library: Library, backend: ModelBackend, hist_bins: int = 64,
-        singular_max_dim: int = 4096, **kwargs):
+        stat_sample: int = 1_000_000, svd_dim: int = 256, **kwargs):
     model_id = library.model_id()
 
     index_rows = []
@@ -48,6 +48,7 @@ def run(library: Library, backend: ModelBackend, hist_bins: int = 64,
     hist_rows = []
     rowcol_rows = []
     sing_rows = []
+    rng = np.random.default_rng(0)
 
     for name, shape, dtype in backend.iter_named_tensors():
         layer_id, component, role, logical = _classify(name)
@@ -64,27 +65,30 @@ def run(library: Library, backend: ModelBackend, hist_bins: int = 64,
 
         arr = backend.get_tensor(name)
         flat = arr.ravel()
-        qs = np.quantile(flat, [0.01, 0.05, 0.25, 0.5, 0.75, 0.95, 0.99]).tolist()
+        #Subsample huge tensors for distribution stats to keep this fast; full
+        #tensors (e.g. the 128k x 4096 embedding) would make SVD/quantiles crawl.
+        sample = flat if flat.size <= stat_sample else flat[
+            rng.integers(0, flat.size, stat_sample)]
+        qs = np.quantile(sample, [0.01, 0.05, 0.25, 0.5, 0.75, 0.95, 0.99]).tolist()
         stat_rows.append({
             "tensor_id": tid,
-            "mean": float(flat.mean()), "std": float(flat.std()),
+            "mean": float(sample.mean()), "std": float(sample.std()),
             "min": float(flat.min()), "max": float(flat.max()),
             "abs_max": float(np.abs(flat).max()),
             "quantiles": qs,
-            "skewness": _skew(flat), "kurtosis": _kurt(flat),
+            "skewness": _skew(sample), "kurtosis": _kurt(sample),
             "row_norm_summary": _norm_summary(arr, axis=1),
             "col_norm_summary": _norm_summary(arr, axis=0),
         })
 
-        lo, hi = float(flat.min()), float(flat.max())
-        bl, br, ct = fixed_histogram(flat, hist_bins, lo, hi)
+        lo, hi = float(sample.min()), float(sample.max())
+        bl, br, ct = fixed_histogram(sample, hist_bins, lo, hi)
         hist_rows.append({"tensor_id": tid, "bin_left": bl, "bin_right": br, "count": ct})
 
-        #Row/col stats sampled to keep the table bounded for huge tensors.
         if arr.ndim == 2:
             _append_axis_stats(rowcol_rows, tid, arr, axis="row")
             _append_axis_stats(rowcol_rows, tid, arr, axis="col")
-            sing_rows.append(_singular_summary(tid, arr, singular_max_dim))
+            sing_rows.append(_singular_summary(tid, arr, svd_dim, rng))
 
     library.commit_table("catalog/tensor_index.parquet", index_rows, "catalog", "scan-tensors")
     library.commit_table("tensors/tensor_stats.parquet", stat_rows, "tensors", "scan-tensors")
@@ -127,11 +131,14 @@ def _append_axis_stats(rows, tid, arr, axis, sample=64):
         })
 
 
-def _singular_summary(tid, arr, max_dim):
-    #Bound cost: subsample large matrices before SVD of the smaller dimension.
+def _singular_summary(tid, arr, max_dim, rng):
+    #Bound cost hard: SVD on a random square submatrix (<= max_dim) so even the
+    #huge embedding/projection tensors summarize in milliseconds, not minutes.
     a = arr
-    if min(a.shape) > max_dim:
-        a = a[:max_dim, :max_dim]
+    if a.shape[0] > max_dim:
+        a = a[rng.integers(0, a.shape[0], max_dim), :]
+    if a.shape[1] > max_dim:
+        a = a[:, rng.integers(0, a.shape[1], max_dim)]
     try:
         sv = np.linalg.svd(a, compute_uv=False)
     except np.linalg.LinAlgError:

@@ -119,26 +119,63 @@ class ModelBackend:
         self._config = AutoConfig.from_pretrained(self.model_path)
         return self._config
 
+    def _hf_cache_dir(self, src) -> Path:
+        """Where the dequantized GGUF is cached as a materialized HF checkpoint.
+
+        Re-dequantizing the GGUF on every stage is wasteful (~30s each). After the
+        first load we save the model in HF format and reuse it, so later stages
+        load instantly and fully materialized (no meta-device offload).
+        """
+        from .config import DATA_ROOT
+        root = Path(self.build_dir) if self.build_dir else DATA_ROOT / "atlas_hf_cache"
+        return root / f"{src.gguf_path.stem}.hf"
+
     def load(self) -> None:
         if self._model is not None:
             return
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
-        gguf_kwargs = self._gguf_kwargs()
-        load_dir = self._load_dir()
+        src = self._gguf_source()
+        cache_dir = self._hf_cache_dir(src) if src else None
+        cached = bool(cache_dir and (cache_dir / "config.json").exists())
+
+        if src is None:
+            load_dir, gguf_kwargs = self.model_path, {}
+        elif cached:
+            #Reuse the dequantized HF checkpoint — fast, no re-dequant.
+            load_dir, gguf_kwargs = str(cache_dir), {}
+        else:
+            load_dir, gguf_kwargs = src.directory, {"gguf_file": src.filename}
+
         dtype = getattr(torch, self.dtype, torch.float32)
-        device_map = self.device if self.device != "cpu" else None
+        #Load fully materialized (no device_map) so every weight has real storage;
+        #device_map="auto" would offload parts of the 8B model to the meta device.
         self._model = AutoModelForCausalLM.from_pretrained(
-            load_dir, torch_dtype=dtype,
-            device_map=device_map, output_hidden_states=False, **gguf_kwargs,
+            load_dir, torch_dtype=dtype, low_cpu_mem_usage=True,
+            output_hidden_states=False, **gguf_kwargs,
         )
         self._model.eval()
-        tok_dir = self._load_dir() if self._gguf_source() else self.tokenizer_path
-        self._tokenizer = AutoTokenizer.from_pretrained(tok_dir, **gguf_kwargs)
+        if self.device == "cuda":
+            import torch as _t
+            if _t.cuda.is_available():
+                self._model.to("cuda")
+
+        tok_dir = str(cache_dir) if cached else (src.directory if src else self.tokenizer_path)
+        tok_kwargs = {} if cached else gguf_kwargs
+        self._tokenizer = AutoTokenizer.from_pretrained(tok_dir, **tok_kwargs)
         if self._tokenizer.pad_token is None:
             self._tokenizer.pad_token = self._tokenizer.eos_token
         self._config = self._model.config
+
+        #Persist the dequantized checkpoint for subsequent stages.
+        if src is not None and not cached:
+            try:
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                self._model.save_pretrained(str(cache_dir))
+                self._tokenizer.save_pretrained(str(cache_dir))
+            except Exception:  # noqa: BLE001 — caching is best-effort
+                pass
 
     @property
     def tokenizer(self):
