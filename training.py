@@ -764,6 +764,9 @@ def save_model(path, model, optimizer, cfg, step):
         {
             "model": model.state_dict(),
             "optimizer": optimizer.state_dict() if optimizer is not None else None,
+            #record which optimizer made this state so a resume can tell whether
+            #the saved state is compatible (adamw state can't load into sgd, etc.)
+            "optimizer_type": cfg.optimizer,
             "config": config_meta,
             "step": step,
         },
@@ -892,8 +895,20 @@ def train(cfg):
             )
 
         model.load_state_dict(checkpoint["model"])
-        if checkpoint.get("optimizer") is not None:
+
+        #only reload optimizer state if it came from the same optimizer type.
+        #adamw state (momentum + variance) is incompatible with sgd and vice
+        #versa, so on a mismatch we keep the model weights but start the
+        #optimizer fresh instead of crashing.
+        saved_optimizer = checkpoint.get("optimizer_type")
+        if checkpoint.get("optimizer") is not None and saved_optimizer == cfg.optimizer:
             optimizer.load_state_dict(checkpoint["optimizer"])
+        elif checkpoint.get("optimizer") is not None:
+            print(
+                f"optimizer changed ({saved_optimizer} -> {cfg.optimizer}); "
+                "keeping model weights but starting optimizer state fresh",
+                flush=True,
+            )
         start_step = checkpoint.get("step", 0)
 
     model.train()
