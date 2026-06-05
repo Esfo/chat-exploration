@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+#End-to-end MIBL extraction driver, mirroring the style of
+#/rescaling/scalingexecution. It references the same model family and the same
+#data root (/home/sfo/data/models) used there; activation capture needs an
+#HF-format checkpoint, so SOURCE_MODEL points at the HF weights rather than the
+#Ollama GGUF that /rescaling scales.
+
+#--- configuration ---------------------------------------------------------
+DATA_ROOT="${ATLAS_DATA_ROOT:-$HOME/data/models}"
+
+#HF-format Llama 3 8B (same family as /rescaling's llama3:8b GGUF).
+SOURCE_MODEL="$DATA_ROOT/Meta-Llama-3-8B"
+
+#Output library location (mirrors the /rescaling output-under-data convention).
+LIBRARY_DIR="$DATA_ROOT/atlas_library"
+
+TARGET_TOKENS="${TARGET_TOKENS:-500000}"
+BATCH_SIZE="${BATCH_SIZE:-4}"
+
+#Optional: cap MLP neurons per layer to bound a first smoke run (0 = all).
+MAX_MLP_NEURONS_PER_LAYER="${MAX_MLP_NEURONS_PER_LAYER:-0}"
+
+#--- run -------------------------------------------------------------------
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+cd "$SCRIPT_DIR"
+
+python3 -m atlas.cli --out "$LIBRARY_DIR" init \
+  --model "$SOURCE_MODEL" \
+  --tokenizer "$SOURCE_MODEL" \
+  --tokens "$TARGET_TOKENS" \
+  --max-mlp-neurons-per-layer "$MAX_MLP_NEURONS_PER_LAYER"
+
+python3 -m atlas.cli --out "$LIBRARY_DIR" run-all
+
+echo
+echo "Library written to: $LIBRARY_DIR"
+echo "Query it with DuckDB:"
+echo "  duckdb $LIBRARY_DIR/indexes/atlas.duckdb"

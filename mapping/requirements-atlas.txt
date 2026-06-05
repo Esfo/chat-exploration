@@ -1,0 +1,19 @@
+# Dependencies for the atlas MIBL extraction system (mapping/atlas).
+#
+# The pure-data layers (schemas, storage, sketches, clustering, summaries,
+# query) need only numpy + the on-disk format libraries. Activation capture
+# additionally needs an HF-format model via torch + transformers; install the
+# CUDA build of torch the same way as the repo's top-level requirements.txt.
+
+numpy>=1.24
+pyarrow>=14
+zarr>=2.16
+duckdb>=0.10
+
+# Model backend for activation capture (Stages 6/7/11). Install the GPU build of
+# torch per https://pytorch.org/get-started/locally/ for real runs.
+transformers>=4.40
+torch>=2.1
+
+# Optional acceleration for the unit/cluster vector indexes (stage 13).
+# faiss-cpu>=1.7
