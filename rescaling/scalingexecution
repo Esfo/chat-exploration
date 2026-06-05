@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SOURCE_MODEL="llama3:8b"
+
+OUTPUT_DIR="$HOME/data/models/ollama-mods"
+OUTPUT_FILE="custom_llama3_8b_scaled.gguf"
+
+MODEL_NAME="${OUTPUT_FILE%.gguf}"
+SCALING_INDEX="0.1"
+
+python3 weightscaling.py \
+  --model "$SOURCE_MODEL" \
+  --output-dir "$OUTPUT_DIR" \
+  --output-file "$OUTPUT_FILE" \
+  --scaling-index "$SCALING_INDEX" \
+  --overwrite
+
+./make-ollama-model.sh "$OUTPUT_DIR/$OUTPUT_FILE" \
+  --name "$MODEL_NAME" \
+  --overwrite
