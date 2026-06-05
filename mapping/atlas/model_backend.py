@@ -75,6 +75,7 @@ class ModelBackend:
         self._model = None
         self._tokenizer = None
         self._config = None
+        self._sd = None  # cached state dict
         self._gguf = None  # resolved GGUFSource, or False if this is a HF dir
 
     #--- GGUF resolution --------------------------------------------------
@@ -210,21 +211,27 @@ class ModelBackend:
         return sum(p.numel() for p in self._model.parameters())
 
     #--- tensor catalog ---------------------------------------------------
-    def iter_named_tensors(self) -> Iterator[tuple[str, tuple[int, ...], str]]:
-        """Yield (name, shape, dtype) for every weight tensor.
+    def _state_dict(self):
+        """Return the model state dict, built once and cached.
 
-        Uses the state dict metadata; for large models prefer the safetensors
-        header to avoid materializing tensors, but the simple path works for the
-        catalog because we only read shapes here.
+        ``state_dict()`` materializes a whole new ordered dict each call, so the
+        previous per-tensor reads were rebuilding it hundreds of times. Caching it
+        makes scan-tensors and static-analysis dramatically cheaper and lets a
+        thread pool read tensors concurrently from one shared dict.
         """
         self.load()
-        for name, tensor in self._model.state_dict().items():
+        if self._sd is None:
+            self._sd = self._model.state_dict()
+        return self._sd
+
+    def iter_named_tensors(self) -> Iterator[tuple[str, tuple[int, ...], str]]:
+        """Yield (name, shape, dtype) for every weight tensor."""
+        for name, tensor in self._state_dict().items():
             yield name, tuple(tensor.shape), str(tensor.dtype).replace("torch.", "")
 
     def get_tensor(self, name: str):
         """Return a single weight tensor as a numpy array (float32)."""
-        self.load()
-        sd = self._model.state_dict()
+        sd = self._state_dict()
         if name not in sd:
             raise KeyError(name)
         return sd[name].to("cpu").float().numpy()

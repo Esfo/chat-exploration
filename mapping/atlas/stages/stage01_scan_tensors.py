@@ -15,6 +15,7 @@ import numpy as np
 from .. import ids
 from ..manifest import Library
 from ..model_backend import ModelBackend, LLAMA_LAYER_TENSORS
+from ..parallel import thread_map
 from ..sketches import fixed_histogram
 from . import register
 
@@ -42,26 +43,29 @@ def _classify(name: str) -> tuple[int, str, str, str]:
 def run(library: Library, backend: ModelBackend, hist_bins: int = 64,
         stat_sample: int = 1_000_000, svd_dim: int = 256, **kwargs):
     model_id = library.model_id()
+    specs = list(backend.iter_named_tensors())
 
-    index_rows = []
-    stat_rows = []
-    hist_rows = []
-    rowcol_rows = []
-    sing_rows = []
-    rng = np.random.default_rng(0)
+    def process(spec):
+        """Compute every summary for one tensor. Runs on a worker thread.
 
-    for name, shape, dtype in backend.iter_named_tensors():
+        NumPy releases the GIL during the heavy reductions/SVD, and the backend's
+        state dict is cached and read-only here, so tensors are processed
+        concurrently while sharing the one in-memory model.
+        """
+        name, shape, dtype = spec
+        #Per-tensor RNG keyed by name -> deterministic regardless of thread order.
+        rng = np.random.default_rng(abs(hash(name)) % (2 ** 32))
         layer_id, component, role, logical = _classify(name)
         tid = ids.tensor_id(name)
         param_count = int(np.prod(shape)) if shape else 0
 
-        index_rows.append({
+        index_row = {
             "tensor_id": tid, "model_id": model_id, "tensor_name": name,
             "logical_name": logical, "layer_id": layer_id,
             "component_type": component, "architecture_role": role,
             "shape": list(shape), "dtype": dtype, "parameter_count": param_count,
             "checkpoint_file": "", "checkpoint_offset": -1, "hash": tid,
-        })
+        }
 
         arr = backend.get_tensor(name)
         flat = arr.ravel()
@@ -70,7 +74,7 @@ def run(library: Library, backend: ModelBackend, hist_bins: int = 64,
         sample = flat if flat.size <= stat_sample else flat[
             rng.integers(0, flat.size, stat_sample)]
         qs = np.quantile(sample, [0.01, 0.05, 0.25, 0.5, 0.75, 0.95, 0.99]).tolist()
-        stat_rows.append({
+        stat_row = {
             "tensor_id": tid,
             "mean": float(sample.mean()), "std": float(sample.std()),
             "min": float(flat.min()), "max": float(flat.max()),
@@ -79,16 +83,30 @@ def run(library: Library, backend: ModelBackend, hist_bins: int = 64,
             "skewness": _skew(sample), "kurtosis": _kurt(sample),
             "row_norm_summary": _norm_summary(arr, axis=1),
             "col_norm_summary": _norm_summary(arr, axis=0),
-        })
+        }
 
         lo, hi = float(sample.min()), float(sample.max())
         bl, br, ct = fixed_histogram(sample, hist_bins, lo, hi)
-        hist_rows.append({"tensor_id": tid, "bin_left": bl, "bin_right": br, "count": ct})
+        hist_row = {"tensor_id": tid, "bin_left": bl, "bin_right": br, "count": ct}
 
+        rc_rows: list = []
+        sing_row = None
         if arr.ndim == 2:
-            _append_axis_stats(rowcol_rows, tid, arr, axis="row")
-            _append_axis_stats(rowcol_rows, tid, arr, axis="col")
-            sing_rows.append(_singular_summary(tid, arr, svd_dim, rng))
+            _append_axis_stats(rc_rows, tid, arr, axis="row")
+            _append_axis_stats(rc_rows, tid, arr, axis="col")
+            sing_row = _singular_summary(tid, arr, svd_dim, rng)
+        return index_row, stat_row, hist_row, rc_rows, sing_row
+
+    results = thread_map(process, specs)
+
+    index_rows, stat_rows, hist_rows, rowcol_rows, sing_rows = [], [], [], [], []
+    for index_row, stat_row, hist_row, rc_rows, sing_row in results:
+        index_rows.append(index_row)
+        stat_rows.append(stat_row)
+        hist_rows.append(hist_row)
+        rowcol_rows.extend(rc_rows)
+        if sing_row is not None:
+            sing_rows.append(sing_row)
 
     library.commit_table("catalog/tensor_index.parquet", index_rows, "catalog", "scan-tensors")
     library.commit_table("tensors/tensor_stats.parquet", stat_rows, "tensors", "scan-tensors")

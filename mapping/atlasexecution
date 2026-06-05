@@ -32,17 +32,26 @@ if [ "$DEQUANTIZE_F16" = "1" ]; then
   DEQUANT_FLAG="--dequantize-f16"
 fi
 
+#Thread count for torch + BLAS. Exporting before Python starts is the reliable
+#way to make NumPy's BLAS use every core. Defaults to all cores.
+THREADS="${THREADS:-$(nproc 2>/dev/null || echo 1)}"
+export OMP_NUM_THREADS="$THREADS"
+export MKL_NUM_THREADS="$THREADS"
+export OPENBLAS_NUM_THREADS="$THREADS"
+export NUMEXPR_NUM_THREADS="$THREADS"
+export VECLIB_MAXIMUM_THREADS="$THREADS"
+
 #--- run -------------------------------------------------------------------
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 cd "$SCRIPT_DIR"
 
-python3 -m atlas.cli --out "$LIBRARY_DIR" init \
+python3 -m atlas.cli --out "$LIBRARY_DIR" --threads "$THREADS" init \
   --model "$SOURCE_MODEL" \
   --tokens "$TARGET_TOKENS" \
   --max-mlp-neurons-per-layer "$MAX_MLP_NEURONS_PER_LAYER" \
   $DEQUANT_FLAG
 
-python3 -m atlas.cli --out "$LIBRARY_DIR" run-all
+python3 -m atlas.cli --out "$LIBRARY_DIR" --threads "$THREADS" run-all
 
 echo
 echo "Library written to: $LIBRARY_DIR"

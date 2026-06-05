@@ -110,6 +110,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="atlas", description="MIBL extraction pipeline")
     p.add_argument("--out", default=str(DEFAULT_LIBRARY_DIR),
                    help="library directory (default: %(default)s)")
+    p.add_argument("--threads", type=int, default=0,
+                   help="CPU threads for torch/BLAS and the numpy stages "
+                        "(0 = all cores)")
     sub = p.add_subparsers(dest="command", required=True)
 
     init = sub.add_parser("init", help="initialize a new library")
@@ -147,6 +150,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv=None) -> None:
     args = build_parser().parse_args(argv)
+    from .parallel import configure_threads
+    threads = configure_threads(args.threads)
+    print(f"[atlas] using up to {threads} CPU threads")
     if args.command == "run-all":
         _run_all(args)
     else:

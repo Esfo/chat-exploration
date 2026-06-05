@@ -12,6 +12,7 @@ import numpy as np
 
 from ..manifest import Library
 from ..model_backend import ModelBackend
+from ..parallel import thread_map
 from ..sketches import random_projection_matrix
 from ..storage import read_parquet, write_zarr_array
 from . import register
@@ -33,25 +34,22 @@ def run(library: Library, backend: ModelBackend, **kwargs):
     #Shared projection so read/write sketches live in the same space (hidden dim).
     proj = random_projection_matrix(arch.hidden_size, config.signature_dim, config.sketch_seed)
 
-    #Cache tensors so each is loaded once.
+    #Pre-load every referenced tensor once, single-threaded, so the per-unit
+    #workers below read from a fully-populated, read-only cache (thread-safe).
     tensor_cache: dict[str, np.ndarray] = {}
-
-    def tensor(tid_to_name_unit) -> np.ndarray:
-        return tensor_cache[tid_to_name_unit]
-
-    stat_rows = []
-    unit_ids = []
-    read_sketches = []
-    write_sketches = []
-
     for u in units:
+        for r in refs_by_unit.get(u["unit_id"], []):
+            name = _tensor_name_for_unit(u, r)
+            if name and name not in tensor_cache:
+                tensor_cache[name] = backend.get_tensor(name)
+
+    def process(u):
+        """Per-unit static geometry + direction sketches. Runs on a worker."""
         uid = u["unit_id"]
         read_vec, write_vec = _unit_vectors(backend, u, refs_by_unit.get(uid, []), tensor_cache)
-
         read_norm = float(np.linalg.norm(read_vec)) if read_vec is not None else 0.0
         write_norm = float(np.linalg.norm(write_vec)) if write_vec is not None else 0.0
-
-        stat_rows.append({
+        stat_row = {
             "unit_id": uid,
             "read_norm": read_norm, "write_norm": write_norm,
             "read_mean": _safe(read_vec, np.mean), "read_std": _safe(read_vec, np.std),
@@ -59,10 +57,19 @@ def run(library: Library, backend: ModelBackend, **kwargs):
             "read_kurtosis": _kurt(read_vec), "write_kurtosis": _kurt(write_vec),
             "weight_tail_ratio": _tail_ratio(write_vec),
             "static_outlier_score": _outlier_score(read_vec, write_vec),
-        })
+        }
+        return (uid, stat_row,
+                _sketch(read_vec, proj, config.signature_dim),
+                _sketch(write_vec, proj, config.signature_dim))
+
+    results = thread_map(process, units)
+
+    stat_rows, unit_ids, read_sketches, write_sketches = [], [], [], []
+    for uid, stat_row, read_sk, write_sk in results:
         unit_ids.append(uid)
-        read_sketches.append(_sketch(read_vec, proj, config.signature_dim))
-        write_sketches.append(_sketch(write_vec, proj, config.signature_dim))
+        stat_rows.append(stat_row)
+        read_sketches.append(read_sk)
+        write_sketches.append(write_sk)
 
     library.commit_table("units/unit_static_stats.parquet", stat_rows, "units", "static-analysis")
     write_zarr_array(
