@@ -15,6 +15,7 @@ import numpy as np
 from ..capture_accum import GroupAccumulator
 from ..manifest import Library
 from ..model_backend import ModelBackend
+from ..progress import Progress
 from ..sketches import fixed_histogram
 from ..storage import read_parquet, write_zarr_array
 from . import register
@@ -55,13 +56,18 @@ def run(library: Library, backend: ModelBackend, batch_size: int | None = None,
     total = len(seq_ids)
     n_batches = (total + batch_size - 1) // batch_size
     total_tokens = sum(len(s) for s in sequences.values())
-    print(f"[capture] {total} sequences / {total_tokens} tokens in {n_batches} "
-          f"batches (batch_size={batch_size}) — this is the heavy stage", flush=True)
-    start_time = time.time()
+    n_units = sum(len(g["uids"]) for g in groups.values())
+    print(f"[capture-activations] {total} sequences / {total_tokens} tokens / "
+          f"{n_units} units in {n_batches} batches (batch_size={batch_size}). "
+          f"This is the heavy stage; forward passes use all cores via BLAS.",
+          flush=True)
+    prog = Progress("capture-activations", n_batches)
+    tokens_seen = 0
 
-    for bi, start in enumerate(range(0, total, batch_size)):
+    for start in range(0, total, batch_size):
         batch_seq_ids = seq_ids[start:start + batch_size]
         input_ids, attn_mask, meta = _build_batch(sequences, batch_seq_ids, pad_id)
+        batch_tokens = sum(m[3] for m in meta)
 
         def on_layer(layer_id, captured, _meta=meta):
             _accumulate_layer(groups, layer_id, captured, _meta)
@@ -69,17 +75,13 @@ def run(library: Library, backend: ModelBackend, batch_size: int | None = None,
         #The backend owns torch conversion/device placement (see ModelBackend).
         backend.capture(input_ids, attn_mask, on_layer)
 
-        #Live progress + ETA so the stage is observable rather than looking hung.
-        done = bi + 1
-        if done == 1 or done % 5 == 0 or done == n_batches:
-            elapsed = time.time() - start_time
-            rate = done / elapsed if elapsed else 0.0
-            eta = (n_batches - done) / rate if rate else 0.0
-            print(f"[capture] batch {done}/{n_batches}  "
-                  f"elapsed {elapsed/60:.1f}m  ETA {eta/60:.1f}m  "
-                  f"({rate*batch_size:.1f} seq/s)", flush=True)
+        tokens_seen += batch_tokens
+        elapsed = time.time() - prog.start
+        tok_rate = tokens_seen / elapsed if elapsed else 0.0
+        prog.tick(extra=f"{tokens_seen}/{total_tokens} tokens  ({tok_rate:.0f} tok/s)")
 
-    print("[capture] writing summaries...", flush=True)
+    prog.done(extra=f"{tokens_seen} tokens")
+    print("[capture-activations] writing compressed summaries to disk…", flush=True)
     _write_outputs(library, groups, run_id, hist_bins)
     library.log("capture-activations", "activation capture complete",
                 sequences=len(seq_ids))

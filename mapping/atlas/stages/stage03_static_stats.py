@@ -23,10 +23,13 @@ from __future__ import annotations
 
 import numpy as np
 
+import os
+
 from .. import ids
 from ..manifest import Library
 from ..model_backend import ModelBackend
 from ..parallel import resolve_workers, thread_map
+from ..progress import Progress
 from ..sketches import random_projection_matrix
 from ..storage import write_zarr_array
 from . import register
@@ -44,6 +47,9 @@ def run(library: Library, backend: ModelBackend, layer_workers: int = 0, **kwarg
     if config.max_mlp_neurons_per_layer:
         n_mlp = min(n_mlp, config.max_mlp_neurons_per_layer)
     hd, n_heads = arch.head_dim, arch.num_attention_heads
+    units_per_layer = (n_mlp if config.include_mlp_neurons else 0) + \
+                      (n_heads if config.include_attention_heads else 0)
+    prog = Progress("static-analysis", arch.num_layers)
 
     def process_layer(layer):
         """All per-unit stats + sketches for one layer (mlp + heads).
@@ -68,13 +74,18 @@ def run(library: Library, backend: ModelBackend, layer_workers: int = 0, **kwarg
             _emit_group(layer, "attn_head", n_heads,
                         np.ascontiguousarray(read_mat), np.ascontiguousarray(write_mat),
                         proj, config.signature_dim, rows, u_ids, r_sk, w_sk)
-        print(f"[static] layer {layer} done", flush=True)
+        prog.tick(extra=f"layer {layer:2d}  (+{len(u_ids)} units)")
         return u_ids, rows, r_sk, w_sk
 
     #Each layer transiently holds ~1-2 GB of float64 work arrays, so cap the
-    #concurrency to bound memory rather than using all cores blindly.
-    workers = min(resolve_workers(layer_workers), 6)
+    #concurrency to bound memory. Override with ATLAS_STATIC_WORKERS if you have
+    #headroom and want more cores busy.
+    cap = int(os.environ.get("ATLAS_STATIC_WORKERS", "10"))
+    workers = min(resolve_workers(layer_workers), cap)
+    print(f"[static-analysis] {arch.num_layers} layers, ~{units_per_layer} units/layer, "
+          f"{workers} layers in parallel", flush=True)
     per_layer = thread_map(process_layer, range(arch.num_layers), max_workers=workers)
+    prog.done(extra=f"{sum(len(x[0]) for x in per_layer)} units")
 
     stat_rows: list[dict] = []
     unit_ids: list[str] = []

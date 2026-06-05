@@ -16,6 +16,7 @@ from .. import ids
 from ..manifest import Library
 from ..model_backend import ModelBackend, LLAMA_LAYER_TENSORS
 from ..parallel import thread_map
+from ..progress import Progress
 from ..sketches import fixed_histogram
 from . import register
 
@@ -44,6 +45,8 @@ def run(library: Library, backend: ModelBackend, hist_bins: int = 64,
         stat_sample: int = 1_000_000, svd_dim: int = 256, **kwargs):
     model_id = library.model_id()
     specs = list(backend.iter_named_tensors())
+    prog = Progress("scan-tensors", len(specs), every=16)
+    print(f"[scan-tensors] {len(specs)} tensors to summarize", flush=True)
 
     def process(spec):
         """Compute every summary for one tensor. Runs on a worker thread.
@@ -95,9 +98,11 @@ def run(library: Library, backend: ModelBackend, hist_bins: int = 64,
             _append_axis_stats(rc_rows, tid, arr, axis="row")
             _append_axis_stats(rc_rows, tid, arr, axis="col")
             sing_row = _singular_summary(tid, arr, svd_dim, rng)
+        prog.tick(extra=f"…{name[-40:]}")
         return index_row, stat_row, hist_row, rc_rows, sing_row
 
     results = thread_map(process, specs)
+    prog.done()
 
     index_rows, stat_rows, hist_rows, rowcol_rows, sing_rows = [], [], [], [], []
     for index_row, stat_row, hist_row, rc_rows, sing_row in results:
