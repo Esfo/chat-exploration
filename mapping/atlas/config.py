@@ -44,11 +44,18 @@ class ExtractionConfig:
     """
 
     #--- model / backend ---
-    model_path: str = str(DEFAULT_MODEL_PATH)
-    tokenizer_path: str = str(DEFAULT_TOKENIZER_PATH)
-    backend: str = "hf"  # "hf" (full hooks) — GGUF static-only reserved for later
+    #Default to the Ollama-provided GGUF (resolved via `ollama show`), matching
+    #/rescaling. transformers loads the GGUF directly and dequantizes in memory,
+    #so no Hugging Face download is required.
+    model_path: str = REFERENCE_OLLAMA_MODEL
+    tokenizer_path: str = REFERENCE_OLLAMA_MODEL
+    backend: str = "hf"  # PyTorch backend (loads HF dirs or GGUF transparently)
     dtype: str = "bfloat16"
     device: str = "auto"
+    #If the source quant can't be read in memory, dequantize to F16 GGUF first
+    #with llama-quantize (the same step /rescaling uses), then load that.
+    dequantize_f16: bool = False
+    llama_quantize: str = "llama-quantize"
 
     #--- calibration ---
     target_tokens: int = 500_000

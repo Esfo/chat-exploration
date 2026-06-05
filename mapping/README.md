@@ -15,10 +15,18 @@ artifacts with stable IDs and versioned extraction runs.
 This project lives in `mapping/atlas` and follows the save-location conventions
 of the sibling `rescaling/` pipeline: large artifacts are written under
 `/home/sfo/data/models` (configurable via `--out` / `ATLAS_DATA_ROOT`), and the
-analyzed model is the same Llama 3 8B family. Because activation capture requires
-forward hooks, the default backend loads the **HuggingFace/PyTorch** checkpoint
-(`/home/sfo/data/models/Meta-Llama-3-8B`) rather than the Ollama GGUF that
-`rescaling` scales.
+analyzed model is the same Ollama-provided `llama3:8b` GGUF that `rescaling`
+scales — **no Hugging Face download required**.
+
+Activation capture needs forward hooks, which need a PyTorch model. Rather than
+download HF weights, the backend resolves the Ollama GGUF the same way
+`rescaling/weightscaling.py` does (`ollama show --modelfile` → the `FROM` blob)
+and lets `transformers` load that GGUF directly, **dequantizing it in memory**
+into a `LlamaForCausalLM` we can hook. If a source quantization type can't be
+read directly, pass `--dequantize-f16` (or `DEQUANTIZE_F16=1 ./atlasexecution`)
+to first dequantize to an F16 GGUF with `llama-quantize` — the same step
+`rescaling` uses — and load that. Point `--model` at an HF directory or a
+specific `.gguf` file to override.
 
 ## Concepts (kept separate on purpose)
 

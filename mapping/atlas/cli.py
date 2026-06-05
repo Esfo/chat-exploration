@@ -25,7 +25,14 @@ from .model_backend import ModelBackend
 
 def _backend_from_library(library: Library) -> ModelBackend:
     cfg = library.config()
-    return ModelBackend(cfg.model_path, cfg.tokenizer_path, cfg.dtype, cfg.device)
+    return _backend_from_config(cfg)
+
+
+def _backend_from_config(cfg) -> ModelBackend:
+    return ModelBackend(
+        cfg.model_path, cfg.tokenizer_path, cfg.dtype, cfg.device,
+        dequantize_f16=cfg.dequantize_f16, llama_quantize=cfg.llama_quantize,
+    )
 
 
 def _run_stage(stage_name: str, args) -> None:
@@ -35,8 +42,7 @@ def _run_stage(stage_name: str, args) -> None:
 
     if stage_name == "init":
         config = _config_from_init_args(args)
-        backend = ModelBackend(config.model_path, config.tokenizer_path,
-                               config.dtype, config.device)
+        backend = _backend_from_config(config)
         result = stage.run(library, backend, config=config)
         print(f"[init] {result}")
         return
@@ -70,6 +76,10 @@ def _config_from_init_args(args) -> ExtractionConfig:
         cfg.target_tokens = args.tokens
     if args.max_mlp_neurons_per_layer is not None:
         cfg.max_mlp_neurons_per_layer = args.max_mlp_neurons_per_layer
+    if getattr(args, "dequantize_f16", False):
+        cfg.dequantize_f16 = True
+    if getattr(args, "llama_quantize", None):
+        cfg.llama_quantize = args.llama_quantize
     return cfg
 
 
@@ -103,11 +113,18 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
 
     init = sub.add_parser("init", help="initialize a new library")
-    init.add_argument("--model", default=str(DEFAULT_MODEL_PATH))
-    init.add_argument("--tokenizer", default=str(DEFAULT_TOKENIZER_PATH))
+    #Default model is the Ollama GGUF (e.g. "llama3:8b"); pass a path for HF dirs
+    #or a specific .gguf file.
+    init.add_argument("--model", default=ExtractionConfig().model_path)
+    init.add_argument("--tokenizer", default=None)
     init.add_argument("--dtype", default=None)
     init.add_argument("--device", default=None)
     init.add_argument("--tokens", type=int, default=None)
+    init.add_argument("--dequantize-f16", dest="dequantize_f16", action="store_true",
+                      help="dequantize the source GGUF to F16 via llama-quantize "
+                           "before loading (fallback for unreadable quant types)")
+    init.add_argument("--llama-quantize", dest="llama_quantize", default=None,
+                      help="path/name of the llama-quantize binary")
     init.add_argument("--max-mlp-neurons-per-layer", dest="max_mlp_neurons_per_layer",
                       type=int, default=None,
                       help="cap MLP neurons per layer (0 = all) to bound cost")

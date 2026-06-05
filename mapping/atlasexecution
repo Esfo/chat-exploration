@@ -10,8 +10,10 @@ set -euo pipefail
 #--- configuration ---------------------------------------------------------
 DATA_ROOT="${ATLAS_DATA_ROOT:-$HOME/data/models}"
 
-#HF-format Llama 3 8B (same family as /rescaling's llama3:8b GGUF).
-SOURCE_MODEL="$DATA_ROOT/Meta-Llama-3-8B"
+#Same model /rescaling uses: the Ollama-provided GGUF, resolved via
+#`ollama show --modelfile`. transformers loads the GGUF directly and
+#dequantizes it in memory for forward hooks (no Hugging Face download).
+SOURCE_MODEL="${SOURCE_MODEL:-llama3:8b}"
 
 #Output library location (mirrors the /rescaling output-under-data convention).
 LIBRARY_DIR="$DATA_ROOT/atlas_library"
@@ -22,15 +24,23 @@ BATCH_SIZE="${BATCH_SIZE:-4}"
 #Optional: cap MLP neurons per layer to bound a first smoke run (0 = all).
 MAX_MLP_NEURONS_PER_LAYER="${MAX_MLP_NEURONS_PER_LAYER:-0}"
 
+#Set DEQUANTIZE_F16=1 to pre-dequantize the GGUF to F16 with llama-quantize
+#(fallback if transformers can't read the source quant type directly).
+DEQUANTIZE_F16="${DEQUANTIZE_F16:-0}"
+DEQUANT_FLAG=""
+if [ "$DEQUANTIZE_F16" = "1" ]; then
+  DEQUANT_FLAG="--dequantize-f16"
+fi
+
 #--- run -------------------------------------------------------------------
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 cd "$SCRIPT_DIR"
 
 python3 -m atlas.cli --out "$LIBRARY_DIR" init \
   --model "$SOURCE_MODEL" \
-  --tokenizer "$SOURCE_MODEL" \
   --tokens "$TARGET_TOKENS" \
-  --max-mlp-neurons-per-layer "$MAX_MLP_NEURONS_PER_LAYER"
+  --max-mlp-neurons-per-layer "$MAX_MLP_NEURONS_PER_LAYER" \
+  $DEQUANT_FLAG
 
 python3 -m atlas.cli --out "$LIBRARY_DIR" run-all
 

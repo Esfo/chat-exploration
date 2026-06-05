@@ -62,21 +62,61 @@ class ModelBackend:
     """Lazy wrapper around an HF causal-LM with hook-based activation capture."""
 
     def __init__(self, model_path: str, tokenizer_path: str | None = None,
-                 dtype: str = "bfloat16", device: str = "auto"):
+                 dtype: str = "bfloat16", device: str = "auto",
+                 dequantize_f16: bool = False, llama_quantize: str = "llama-quantize",
+                 build_dir: str | None = None):
         self.model_path = model_path
         self.tokenizer_path = tokenizer_path or model_path
         self.dtype = dtype
         self.device = device
+        self.dequantize_f16 = dequantize_f16
+        self.llama_quantize = llama_quantize
+        self.build_dir = build_dir
         self._model = None
         self._tokenizer = None
         self._config = None
+        self._gguf = None  # resolved GGUFSource, or False if this is a HF dir
+
+    #--- GGUF resolution --------------------------------------------------
+    def _gguf_source(self):
+        """Resolve (and cache) the GGUF source, or return None for HF dirs.
+
+        Mirrors /rescaling: an Ollama model name or .gguf path is resolved to a
+        local GGUF blob, optionally dequantized to F16 first. ``transformers``
+        then loads it directly, dequantizing in memory — no HF download needed.
+        """
+        if self._gguf is None:
+            from . import gguf_source
+            if gguf_source.looks_like_gguf_request(self.model_path):
+                src = gguf_source.resolve_gguf_source(self.model_path)
+                if self.dequantize_f16:
+                    build = Path(self.build_dir) if self.build_dir else src.gguf_path.parent / "build"
+                    src = gguf_source.dequantize_to_f16(
+                        src.gguf_path, build, self.llama_quantize)
+                self._gguf = src
+            else:
+                self._gguf = False
+        return self._gguf or None
+
+    def _gguf_kwargs(self) -> dict:
+        src = self._gguf_source()
+        return {"gguf_file": src.filename} if src else {}
+
+    def _load_dir(self) -> str:
+        src = self._gguf_source()
+        return src.directory if src else self.model_path
 
     #--- loading ----------------------------------------------------------
     def load_config_only(self):
-        """Read the HF config without instantiating weights (cheap)."""
-        if self._config is None:
-            from transformers import AutoConfig
-            self._config = AutoConfig.from_pretrained(self.model_path)
+        """Read the model config. For GGUF sources this loads the full model
+        (the config is embedded in the GGUF), which is needed at init anyway."""
+        if self._config is not None:
+            return self._config
+        if self._gguf_source() is not None:
+            self.load()
+            return self._config
+        from transformers import AutoConfig
+        self._config = AutoConfig.from_pretrained(self.model_path)
         return self._config
 
     def load(self) -> None:
@@ -85,14 +125,17 @@ class ModelBackend:
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
+        gguf_kwargs = self._gguf_kwargs()
+        load_dir = self._load_dir()
         dtype = getattr(torch, self.dtype, torch.float32)
         device_map = self.device if self.device != "cpu" else None
         self._model = AutoModelForCausalLM.from_pretrained(
-            self.model_path, torch_dtype=dtype,
-            device_map=device_map, output_hidden_states=False,
+            load_dir, torch_dtype=dtype,
+            device_map=device_map, output_hidden_states=False, **gguf_kwargs,
         )
         self._model.eval()
-        self._tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_path)
+        tok_dir = self._load_dir() if self._gguf_source() else self.tokenizer_path
+        self._tokenizer = AutoTokenizer.from_pretrained(tok_dir, **gguf_kwargs)
         if self._tokenizer.pad_token is None:
             self._tokenizer.pad_token = self._tokenizer.eos_token
         self._config = self._model.config
@@ -101,7 +144,9 @@ class ModelBackend:
     def tokenizer(self):
         if self._tokenizer is None:
             from transformers import AutoTokenizer
-            self._tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_path)
+            gguf_kwargs = self._gguf_kwargs()
+            tok_dir = self._load_dir() if self._gguf_source() else self.tokenizer_path
+            self._tokenizer = AutoTokenizer.from_pretrained(tok_dir, **gguf_kwargs)
             if self._tokenizer.pad_token is None:
                 self._tokenizer.pad_token = self._tokenizer.eos_token
         return self._tokenizer
