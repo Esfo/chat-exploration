@@ -1,3 +1,5 @@
+import os
+
 from bpe import train as train_tokenizer
 from training import Config, train
 
@@ -18,8 +20,9 @@ vocab_size = 8000
 #train on every word.
 tokenizer_min_frequency = 2
 
-#train a fresh tokenizer and save it to this path. set to False to skip training
-#and just load an existing one from tokeninput below.
+#tokenizer path. if this file already exists it is loaded; if not, a tokenizer
+#is trained and saved here (so it only trains once - delete the file to retrain).
+#set to False to skip this and always load tokeninput below instead.
 tokenoutput = '/home/sfo/data/models/tokens/bpe.json'
 #tokenoutput = False
 
@@ -153,7 +156,11 @@ val_batches = 20
 #receive the already-encoded data from the parent.
 
 def run():
-    if tokenoutput:
+    if tokenoutput and os.path.exists(tokenoutput):
+        #already trained once: just load it (delete the file to force a retrain)
+        tokensfile = tokenoutput
+        print('loading existing tokenizer at', tokensfile)
+    elif tokenoutput:
         print(f'training BPE tokenizer (vocab_size={vocab_size})...')
         tokenizer = train_tokenizer(textsource, vocab_size, tokenizer_min_frequency)
         tokenizer.save(tokenoutput)
