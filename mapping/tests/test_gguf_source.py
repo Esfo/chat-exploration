@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from atlas import gguf_source
 
 
@@ -31,3 +33,25 @@ def test_dir_with_gguf_picks_largest(tmp_path):
 def test_ollama_name_treated_as_gguf():
     #A bare model name that is not an existing path is routed to the Ollama path.
     assert gguf_source.looks_like_gguf_request("llama3:8b") is True
+
+
+def test_ollama_store_resolution_without_server(tmp_path, monkeypatch):
+    #Build a fake ~/.ollama/models layout: manifest + content-addressed blob.
+    models = tmp_path / "models"
+    manifest_dir = models / "manifests" / "registry.ollama.ai" / "library" / "llama3"
+    manifest_dir.mkdir(parents=True)
+    digest = "sha256:abc123"
+    blob = models / "blobs" / "sha256-abc123"
+    blob.parent.mkdir(parents=True)
+    blob.write_bytes(b"GGUF-weights")
+    (manifest_dir / "8b").write_text(json.dumps({
+        "layers": [
+            {"mediaType": "application/vnd.ollama.image.license", "digest": "sha256:lic"},
+            {"mediaType": "application/vnd.ollama.image.model", "digest": digest},
+        ]
+    }))
+    monkeypatch.setenv("OLLAMA_MODELS", str(models))
+
+    resolved = gguf_source.get_source_gguf_from_ollama_store("llama3:8b")
+    assert resolved == blob.resolve()
+

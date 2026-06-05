@@ -19,6 +19,8 @@ Nothing here imports torch/transformers; it only locates and prepares files.
 
 from __future__ import annotations
 
+import json
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -39,9 +41,77 @@ def _resolve(path: str) -> Path:
     return Path(path).expanduser().resolve()
 
 
+def _ollama_models_dir() -> Path:
+    return Path(os.environ.get("OLLAMA_MODELS", Path.home() / ".ollama" / "models"))
+
+
+def get_source_gguf_from_ollama_store(model_name: str) -> Path:
+    """Resolve an Ollama model's GGUF blob from the local store, no server needed.
+
+    Ollama stores models under ``$OLLAMA_MODELS`` (default ``~/.ollama/models``)
+    as a manifest plus content-addressed blobs. We parse the manifest for the
+    layer whose mediaType marks it as the model weights and map its digest to the
+    blob file. This works even when ``ollama serve`` is not running.
+    """
+    models_dir = _ollama_models_dir()
+
+    #Parse "[registry/]namespace/name:tag" with Ollama's defaults.
+    name, _, tag = model_name.partition(":")
+    tag = tag or "latest"
+    parts = name.split("/")
+    if len(parts) == 1:
+        registry, namespace, repo = "registry.ollama.ai", "library", parts[0]
+    elif len(parts) == 2:
+        registry, namespace, repo = "registry.ollama.ai", parts[0], parts[1]
+    else:
+        registry, namespace, repo = parts[0], parts[1], "/".join(parts[2:])
+
+    manifest = models_dir / "manifests" / registry / namespace / repo / tag
+    if not manifest.exists():
+        raise FileNotFoundError(
+            f"Ollama manifest not found for {model_name!r} at {manifest}. "
+            "Pull it first (e.g. `ollama pull llama3:8b`) or set OLLAMA_MODELS."
+        )
+
+    data = json.loads(manifest.read_text())
+    digest = None
+    for layer in data.get("layers", []):
+        if "model" in layer.get("mediaType", ""):
+            digest = layer["digest"]
+            break
+    if digest is None:
+        raise RuntimeError(f"No model layer in Ollama manifest: {manifest}")
+
+    blob = models_dir / "blobs" / digest.replace(":", "-")
+    if not blob.exists():
+        raise FileNotFoundError(f"Ollama blob missing for {model_name!r}: {blob}")
+    return _resolve(str(blob))
+
+
 def get_source_gguf_from_ollama(model_name: str) -> Path:
-    """Return the local GGUF blob backing an Ollama model (mirrors /rescaling)."""
-    modelfile = _run(["ollama", "show", "--modelfile", model_name])
+    """Return the local GGUF blob backing an Ollama model.
+
+    Tries the on-disk store first (no server required); falls back to
+    ``ollama show --modelfile`` (mirrors /rescaling) if the store layout can't be
+    resolved. Surfaces a combined, actionable error if both fail.
+    """
+    store_error = None
+    try:
+        return get_source_gguf_from_ollama_store(model_name)
+    except (FileNotFoundError, RuntimeError, json.JSONDecodeError) as exc:
+        store_error = exc
+
+    try:
+        modelfile = _run(["ollama", "show", "--modelfile", model_name])
+    except (RuntimeError, FileNotFoundError) as exc:
+        raise RuntimeError(
+            f"Could not resolve GGUF for Ollama model {model_name!r}.\n"
+            f"  - local store: {store_error}\n"
+            f"  - `ollama show`: {exc}\n"
+            "Start the server (`ollama serve`) or `ollama pull` the model, "
+            "or pass --model with a direct .gguf path."
+        ) from exc
+
     for line in modelfile.splitlines():
         line = line.strip()
         if not line.startswith("FROM "):
