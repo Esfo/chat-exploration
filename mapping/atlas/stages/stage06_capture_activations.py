@@ -8,6 +8,8 @@ active-position bitsets — the basis for fire-together clustering.
 
 from __future__ import annotations
 
+import time
+
 import numpy as np
 
 from ..capture_accum import GroupAccumulator
@@ -50,7 +52,14 @@ def run(library: Library, backend: ModelBackend, batch_size: int | None = None,
     pad_id = tok.pad_token_id or 0
     seq_ids = sorted(sequences)
 
-    for start in range(0, len(seq_ids), batch_size):
+    total = len(seq_ids)
+    n_batches = (total + batch_size - 1) // batch_size
+    total_tokens = sum(len(s) for s in sequences.values())
+    print(f"[capture] {total} sequences / {total_tokens} tokens in {n_batches} "
+          f"batches (batch_size={batch_size}) — this is the heavy stage", flush=True)
+    start_time = time.time()
+
+    for bi, start in enumerate(range(0, total, batch_size)):
         batch_seq_ids = seq_ids[start:start + batch_size]
         input_ids, attn_mask, meta = _build_batch(sequences, batch_seq_ids, pad_id)
 
@@ -60,6 +69,17 @@ def run(library: Library, backend: ModelBackend, batch_size: int | None = None,
         #The backend owns torch conversion/device placement (see ModelBackend).
         backend.capture(input_ids, attn_mask, on_layer)
 
+        #Live progress + ETA so the stage is observable rather than looking hung.
+        done = bi + 1
+        if done == 1 or done % 5 == 0 or done == n_batches:
+            elapsed = time.time() - start_time
+            rate = done / elapsed if elapsed else 0.0
+            eta = (n_batches - done) / rate if rate else 0.0
+            print(f"[capture] batch {done}/{n_batches}  "
+                  f"elapsed {elapsed/60:.1f}m  ETA {eta/60:.1f}m  "
+                  f"({rate*batch_size:.1f} seq/s)", flush=True)
+
+    print("[capture] writing summaries...", flush=True)
     _write_outputs(library, groups, run_id, hist_bins)
     library.log("capture-activations", "activation capture complete",
                 sequences=len(seq_ids))

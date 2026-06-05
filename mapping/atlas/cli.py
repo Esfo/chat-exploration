@@ -99,11 +99,14 @@ def _run_all(args) -> None:
     if not library.exists():
         sys.exit(f"No library at {args.out!r}. Run `atlas init` first, then `run-all`.")
     #init is run explicitly by the user (it needs --model); run-all does the rest.
+    import time
     v1 = [s for s in stages.ordered_stages()
           if s.version_scope == "v1" and s.name != "init"]
     for stage in v1:
-        print(f"=== running {stage.name} ===")
+        print(f"=== running {stage.name} ===", flush=True)
+        t0 = time.time()
         _run_stage(stage.name, args)
+        print(f"=== {stage.name} done in {(time.time()-t0)/60:.1f}m ===", flush=True)
 
 
 def build_parser() -> argparse.ArgumentParser:

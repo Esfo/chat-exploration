@@ -18,10 +18,16 @@ SOURCE_MODEL="${SOURCE_MODEL:-llama3:8b}"
 #Output library location (mirrors the /rescaling output-under-data convention).
 LIBRARY_DIR="$DATA_ROOT/atlas_library"
 
-TARGET_TOKENS="${TARGET_TOKENS:-500000}"
+#NOTE ON TIME: activation capture runs the full model over every token. On CPU
+#for an 8B model this is the dominant cost and scales linearly with TARGET_TOKENS
+#— 500k tokens can take many hours. The default below is a tractable first pass;
+#raise it once you've confirmed an end-to-end run completes. A GPU that fits the
+#model is the only way to make large token budgets fast.
+TARGET_TOKENS="${TARGET_TOKENS:-50000}"
 BATCH_SIZE="${BATCH_SIZE:-4}"
 
-#Optional: cap MLP neurons per layer to bound a first smoke run (0 = all).
+#Cap MLP neurons per layer to bound capture's per-batch CPU overhead and memory
+#(0 = all). Capping does not reduce forward-pass time, only the accumulation work.
 MAX_MLP_NEURONS_PER_LAYER="${MAX_MLP_NEURONS_PER_LAYER:-0}"
 
 #Set DEQUANTIZE_F16=1 to pre-dequantize the GGUF to F16 with llama-quantize
