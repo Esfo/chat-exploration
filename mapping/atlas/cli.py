@@ -103,6 +103,14 @@ def _run_all(args) -> None:
     v1 = [s for s in stages.ordered_stages()
           if s.version_scope == "v1" and s.name != "init"]
     for stage in v1:
+        #Resume by default: skip a stage whose outputs already exist (they are
+        #committed atomically, so existence means the stage completed). Use
+        #--force to rerun everything.
+        produced = stage.produces and all(library.path(p).exists() for p in stage.produces)
+        if produced and not getattr(args, "force", False):
+            print(f"=== skipping {stage.name} (already done; --force to rerun) ===",
+                  flush=True)
+            continue
         print(f"=== running {stage.name} ===", flush=True)
         t0 = time.time()
         _run_stage(stage.name, args)
@@ -147,7 +155,9 @@ def build_parser() -> argparse.ArgumentParser:
     cap = sub.add_parser("capture-activations", help="capture firing summaries")
     cap.add_argument("--batch-size", dest="batch_size", type=int, default=None)
 
-    sub.add_parser("run-all", help="run the full V1 pipeline in order")
+    runall = sub.add_parser("run-all", help="run the full V1 pipeline in order")
+    runall.add_argument("--force", action="store_true",
+                        help="rerun every stage even if its outputs already exist")
     return p
 
 
