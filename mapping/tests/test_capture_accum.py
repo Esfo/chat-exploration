@@ -65,6 +65,21 @@ def test_reservoir_is_unbiased_sample():
     assert abs(res.mean() - 5.0) < 0.5  # close to the true mean, not biased
 
 
+def test_exact_bitset_no_saturation():
+    """Issue 1: with dense token ordinals and n_bits >= tokens, the bitset is the
+    exact set of fired positions — popcount equals the unit's active count, so
+    density never saturates from hash collisions."""
+    n = 500
+    a = GroupAccumulator(num_units=1, sig_dim=4, n_bits=n, top_k=2, reservoir=8,
+                         active_quantile=0.9, seed=1, top_m=2, sig_seed=1)
+    acts = np.linspace(0, 1, n)[:, None]
+    ordv = np.arange(n, dtype=np.int64)
+    a.update(acts, np.zeros(n, dtype=np.int64), np.arange(n, dtype=np.int64),
+             np.arange(n, dtype=np.int64), ordv)
+    popcount = np.unpackbits(a.bitset, axis=1).sum()
+    assert popcount == int(a.active_count[0])  # exact: one bit per fired token
+
+
 def test_bitset_density_reported():
     a = _acc(3)
     n = 50

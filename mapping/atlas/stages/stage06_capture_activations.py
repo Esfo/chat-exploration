@@ -45,8 +45,21 @@ def run(library: Library, backend: ModelBackend, batch_size: int | None = None,
     for s in sequences.values():
         s.sort(key=lambda r: r["token_position"])
 
+    #Dense global token ordinal so the active bitset can be exact (Issue 1): each
+    #(sequence, position) maps to its own bit when the corpus fits in n_bits.
+    tok_ord: dict[tuple, int] = {}
+    for sid in sorted(sequences):
+        for row in sequences[sid]:
+            tok_ord[(sid, row["token_position"])] = len(tok_ord)
+    total_tokens = len(tok_ord)
+    n_bits = total_tokens if total_tokens <= config.bitset_positions else config.bitset_positions
+    if total_tokens > config.bitset_positions:
+        print(f"[capture-activations] {total_tokens} tokens > bitset_positions "
+              f"({config.bitset_positions}); co-firing bitset will hash and may "
+              f"saturate. Raise bitset_positions for exact overlap.", flush=True)
+
     #Map units -> array position within each (layer, unit_type) group.
-    groups = _build_groups(units, arch, config)
+    groups = _build_groups(units, arch, config, n_bits)
 
     backend.load()
     tok = backend.tokenizer
@@ -55,7 +68,6 @@ def run(library: Library, backend: ModelBackend, batch_size: int | None = None,
 
     total = len(seq_ids)
     n_batches = (total + batch_size - 1) // batch_size
-    total_tokens = sum(len(s) for s in sequences.values())
     n_units = sum(len(g["uids"]) for g in groups.values())
     print(f"[capture-activations] {total} sequences / {total_tokens} tokens / "
           f"{n_units} units in {n_batches} batches (batch_size={batch_size}). "
@@ -66,7 +78,7 @@ def run(library: Library, backend: ModelBackend, batch_size: int | None = None,
 
     for start in range(0, total, batch_size):
         batch_seq_ids = seq_ids[start:start + batch_size]
-        input_ids, attn_mask, meta = _build_batch(sequences, batch_seq_ids, pad_id)
+        input_ids, attn_mask, meta = _build_batch(sequences, batch_seq_ids, pad_id, tok_ord)
         batch_tokens = sum(m[3] for m in meta)
 
         def on_layer(layer_id, captured, _meta=meta):
@@ -89,7 +101,7 @@ def run(library: Library, backend: ModelBackend, batch_size: int | None = None,
     return {"sequences": len(seq_ids)}
 
 
-def _build_groups(units, arch, config):
+def _build_groups(units, arch, config, n_bits):
     """Create a GroupAccumulator per (layer, unit_type) and unit-id ordering."""
     groups = {}
     order: dict[tuple, list[str]] = {}
@@ -104,7 +116,7 @@ def _build_groups(units, arch, config):
             "index": {uid: i for i, uid in enumerate(uids)},
             "acc": GroupAccumulator(
                 num_units=n, sig_dim=config.signature_dim,
-                n_bits=config.bitset_positions, top_k=config.top_events_per_unit,
+                n_bits=n_bits, top_k=config.top_events_per_unit,
                 reservoir=config.reservoir_size, active_quantile=config.active_quantile,
                 seed=config.sketch_seed + layer_id,
                 top_m=config.top_candidates_per_batch,
@@ -114,18 +126,19 @@ def _build_groups(units, arch, config):
     return groups
 
 
-def _build_batch(sequences, batch_seq_ids, pad_id):
+def _build_batch(sequences, batch_seq_ids, pad_id, tok_ord):
     maxlen = max(len(sequences[s]) for s in batch_seq_ids)
     input_ids = np.full((len(batch_seq_ids), maxlen), pad_id, dtype=np.int64)
     attn = np.zeros((len(batch_seq_ids), maxlen), dtype=np.int64)
-    meta = []  # per (row, col): (seq_id, position, token_id) for valid tokens
+    meta = []  # per row: (seq_id, positions, token_ids, length, ordinals)
     for r, s in enumerate(batch_seq_ids):
         rows = sequences[s]
         for c, tokrow in enumerate(rows):
             input_ids[r, c] = tokrow["token_id"]
             attn[r, c] = 1
-        meta.append((s, [tr["token_position"] for tr in rows],
-                     [tr["token_id"] for tr in rows], len(rows)))
+        positions = [tr["token_position"] for tr in rows]
+        meta.append((s, positions, [tr["token_id"] for tr in rows], len(rows),
+                     [tok_ord[(s, p)] for p in positions]))
     return input_ids, attn, meta
 
 
@@ -136,22 +149,25 @@ def _accumulate_layer(groups, layer_id, captured, meta):
         if key not in groups or key_name not in captured:
             continue
         arr = captured[key_name]  # [B, T, num_units]
-        flat, seqs, poss, toks = _flatten_valid(arr, meta)
+        flat, seqs, poss, toks, ords = _flatten_valid(arr, meta)
         if flat.shape[0]:
-            groups[key]["acc"].update(flat, seqs, poss, toks)
+            groups[key]["acc"].update(flat, seqs, poss, toks, ords)
 
 
 def _flatten_valid(arr, meta):
-    rows_vals, seqs, poss, toks = [], [], [], []
-    for r, (seq_id, positions, token_ids, length) in enumerate(meta):
+    rows_vals, seqs, poss, toks, ords = [], [], [], [], []
+    for r, (seq_id, positions, token_ids, length, ordinals) in enumerate(meta):
         rows_vals.append(arr[r, :length, :])
         seqs.extend([seq_id] * length)
         poss.extend(positions)
         toks.extend(token_ids)
+        ords.extend(ordinals)
     if not rows_vals:
-        return np.zeros((0, arr.shape[-1])), np.array([]), np.array([]), np.array([])
+        z = np.array([])
+        return np.zeros((0, arr.shape[-1])), z, z, z, z
     return (np.concatenate(rows_vals, axis=0),
-            np.array(seqs, np.int64), np.array(poss, np.int64), np.array(toks, np.int64))
+            np.array(seqs, np.int64), np.array(poss, np.int64),
+            np.array(toks, np.int64), np.array(ords, np.int64))
 
 
 def _write_outputs(library, groups, run_id, hist_bins):

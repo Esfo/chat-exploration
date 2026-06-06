@@ -96,8 +96,15 @@ class GroupAccumulator:
         self.top_tok = np.full((num_units, top_k), -1, np.int64)
 
     def update(self, acts: np.ndarray, seq_ids: np.ndarray, positions: np.ndarray,
-               token_ids: np.ndarray) -> None:
-        """Update from a batch. ``acts`` is [N_tokens, num_units]."""
+               token_ids: np.ndarray, token_ord: np.ndarray | None = None) -> None:
+        """Update from a batch. ``acts`` is [N_tokens, num_units].
+
+        ``token_ord`` is an optional dense global token index. When provided (and
+        ``n_bits`` >= total tokens) each token maps to its own bit, so the active
+        bitset is an *exact* set of fired positions and overlap is exact Jaccard
+        with no hash-collision saturation (Issue 1). Without it we fall back to a
+        reproducible per-token hash.
+        """
         n = acts.shape[0]
         if n == 0:
             return
@@ -120,8 +127,11 @@ class GroupAccumulator:
         self.thr_sum += thr
         self.thr_batches += 1
 
-        #Bitset marking: hash each token to a bit, OR into active units' bytes.
-        bit_idx = (np.abs(self._hash_tokens(seq_ids, positions)) % self.n_bits)
+        #Bitset marking: map each token to a bit, OR into active units' bytes.
+        if token_ord is not None:
+            bit_idx = (token_ord.astype(np.int64) % self.n_bits)
+        else:
+            bit_idx = (np.abs(self._hash_tokens(seq_ids, positions)) % self.n_bits)
         byte_idx = bit_idx // 8
         bit_mask = (1 << (bit_idx % 8)).astype(np.uint8)
         for t in range(n):

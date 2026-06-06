@@ -123,13 +123,23 @@ def run(library: Library, backend: ModelBackend, **kwargs):
         library, local_clusters, exemplar_rows)
 
     #--- level 2: cross-layer clusters ----------------------------------
+    #Aggregate lagged edges into local-cluster *pairs*; only merge a pair when
+    #enough edges run between them (absolute count + fraction of the smaller
+    #cluster), so one bridge edge can't fuse everything into a giant component.
+    sizes = {cid: len(m) for cid, m in local_clusters.items()}
+    pair_links: dict[tuple, int] = {}
+    for e in lag_edges:
+        cs, ct = local_of_unit.get(e["source_unit_id"]), local_of_unit.get(e["target_unit_id"])
+        if cs and ct and cs != ct:
+            key = (cs, ct) if cs < ct else (ct, cs)
+            pair_links[key] = pair_links.get(key, 0) + 1
+
     uf2 = UnionFind()
     for cid in local_clusters:
         uf2.find(cid)
-    for e in lag_edges:
-        s, t = e["source_unit_id"], e["target_unit_id"]
-        cs, ct = local_of_unit.get(s), local_of_unit.get(t)
-        if cs and ct and cs != ct:
+    for (cs, ct), w in pair_links.items():
+        if w >= config.xlayer_min_links and \
+           w >= config.xlayer_link_fraction * min(sizes[cs], sizes[ct]):
             uf2.union(cs, ct)
 
     xlayer_of_local: dict[str, str] = {}

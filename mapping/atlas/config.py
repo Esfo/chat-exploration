@@ -83,9 +83,11 @@ class ExtractionConfig:
     #--- sketches ---
     #Random-projection signature dimensionality for similarity search.
     signature_dim: int = 256
-    #Length (in bits) of the active-position bitset sample. Kept modest because
-    #every unit holds one packed bitset for the whole capture pass.
-    bitset_positions: int = 2048
+    #Length (in bits) of the active-position bitset. When the corpus has no more
+    #tokens than this, each token gets its own bit and co-firing overlap is an
+    #*exact* Jaccard (no hash-collision saturation, Issue 1); larger corpora hash
+    #into this many bits. 32768 bits = 4 KB/unit.
+    bitset_positions: int = 32768
     #Reservoir size per unit for approximate activation quantiles/histograms.
     reservoir_size: int = 128
     sketch_seed: int = 101
@@ -129,6 +131,12 @@ class ExtractionConfig:
     #Flag a local cluster as a suspicious giant if it covers more than this
     #fraction of its (layer, unit_type) population.
     giant_component_fraction: float = 0.5
+    #Cross-layer linking: only merge two local clusters into one cross-layer
+    #cluster when enough lagged edges run between them — a single bridge edge must
+    #not fuse the whole model into one component. Require both an absolute count
+    #and a fraction of the smaller cluster.
+    xlayer_min_links: int = 3
+    xlayer_link_fraction: float = 0.1
 
     #--- unit selection ---
     include_mlp_neurons: bool = True
