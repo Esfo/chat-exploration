@@ -105,12 +105,20 @@ def _run_all(args) -> None:
     import time
     v1 = [s for s in stages.ordered_stages()
           if s.version_scope == "v1" and s.name != "init"]
-    for stage in v1:
+    #--from <stage>: force a rerun from that stage onward (handy when an upstream
+    #stage was rerun and downstream outputs are now stale).
+    from_stage = getattr(args, "from_stage", None)
+    names = [s.name for s in v1]
+    if from_stage and from_stage not in names:
+        sys.exit(f"Unknown --from stage {from_stage!r}. Choices: {', '.join(names)}")
+    force_from_idx = names.index(from_stage) if from_stage else len(names)
+    for i, stage in enumerate(v1):
         #Resume by default: skip a stage whose outputs already exist (they are
         #committed atomically, so existence means the stage completed). Use
-        #--force to rerun everything.
+        #--force to rerun everything, or --from to rerun a suffix.
+        force = getattr(args, "force", False) or i >= force_from_idx
         produced = stage.produces and all(library.path(p).exists() for p in stage.produces)
-        if produced and not getattr(args, "force", False):
+        if produced and not force:
             print(f"=== skipping {stage.name} (already done; --force to rerun) ===",
                   flush=True)
             continue
@@ -165,6 +173,10 @@ def build_parser() -> argparse.ArgumentParser:
     runall = sub.add_parser("run-all", help="run the full V1 pipeline in order")
     runall.add_argument("--force", action="store_true",
                         help="rerun every stage even if its outputs already exist")
+    runall.add_argument("--from", dest="from_stage", default=None,
+                        help="rerun from this stage onward (e.g. --from cluster), "
+                             "ignoring existing outputs from it on; earlier stages "
+                             "still skip if already done")
     runall.add_argument("--batch-size", dest="batch_size", type=int, default=None,
                         help="capture batch size (larger keeps CPU cores busier)")
     return p
