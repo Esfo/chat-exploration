@@ -174,6 +174,129 @@ def page_overview(lib: str, tables: set[str]):
                 st.caption(f"Could not read run log: {e}")
 
 
+def page_extraction_quality(lib: str, tables: set[str]):
+    st.header("Extraction Quality")
+    st.caption("Whether the extracted data can be trusted — coverage, co-firing "
+               "bitset saturation, graph completeness, and clustering health. "
+               "Read this before interpreting clusters or the connection graph.")
+
+    #--- headline: warnings by severity ---------------------------------
+    if "extraction_warnings" not in tables:
+        st.info("No `extraction_warnings` view. Run the `quality-report` stage "
+                "(part of the full pipeline) to populate this page.")
+        return
+
+    w = _sql(lib, "SELECT severity, kind, scope, detail, value FROM extraction_warnings")
+    n_err = int((w["severity"] == "error").sum()) if not w.empty else 0
+    n_warn = int((w["severity"] == "warn").sum()) if not w.empty else 0
+    c1, c2 = st.columns(2)
+    c1.metric("Errors", n_err)
+    c2.metric("Warnings", n_warn)
+    if n_err:
+        st.error(f"{n_err} extraction error(s): some data is unreliable — see below.")
+    elif n_warn:
+        st.warning(f"{n_warn} warning(s): usable, but check the details below.")
+    else:
+        st.success("No extraction warnings — data looks clean.")
+
+    if not w.empty:
+        #Group repetitive per-layer warnings by kind so the table stays readable.
+        summary = (w.groupby(["severity", "kind"])
+                   .agg(occurrences=("scope", "count"),
+                        example=("detail", "first"))
+                   .reset_index().sort_values(["severity", "occurrences"],
+                                              ascending=[True, False]))
+        st.subheader("Warnings by kind")
+        st.dataframe(summary, width="stretch", hide_index=True)
+        with st.expander("All individual warnings"):
+            st.dataframe(w, width="stretch", hide_index=True)
+
+    #--- activation quality ---------------------------------------------
+    if "activation_quality" in tables:
+        st.subheader("Activation coverage & bitset saturation")
+        aq = _sql(lib, "SELECT layer_id, units, units_with_stats, "
+                       "median_activation_rate, median_bitset_density, "
+                       "max_bitset_density FROM activation_quality ORDER BY layer_id")
+        if not aq.empty:
+            cov = (aq["units_with_stats"].sum() / max(aq["units"].sum(), 1))
+            mcols = st.columns(3)
+            mcols[0].metric("Units with stats", f"{cov*100:.1f}%")
+            mcols[1].metric("Median bitset density",
+                            f"{aq['median_bitset_density'].median():.3f}")
+            mcols[2].metric("Max bitset density",
+                            f"{aq['max_bitset_density'].max():.3f}")
+            st.caption("Bitset density near 1.0 means co-firing overlap is "
+                       "saturated and unreliable. Dashed lines mark the 0.25 "
+                       "(warn) and 0.50 (error) thresholds.")
+            _density_chart(aq)
+            with st.expander("Per-layer activation quality"):
+                st.dataframe(aq, width="stretch", hide_index=True)
+
+    #--- graph coverage --------------------------------------------------
+    if "graph_meta" in tables:
+        st.subheader("Graph coverage")
+        gm = _sql(lib, "SELECT * FROM graph_meta")
+        if not gm.empty:
+            m = gm.iloc[0]
+            cols = st.columns(4)
+            inc, tot = int(m.get("included_units", 0)), int(m.get("total_units", 0))
+            cols[0].metric("Units in graph", f"{inc/max(tot,1)*100:.1f}%",
+                           help=f"{inc:,} of {tot:,}")
+            cols[1].metric("Sampled?", "yes" if m.get("graph_sampled") else "no")
+            cols[2].metric("Layer window", int(m.get("layer_window", 0)))
+            cols[3].metric("Candidate gen", str(m.get("candidate_generation_method", "—")))
+            if m.get("graph_sampled"):
+                st.warning("The graph used a per-layer cap, so some units were "
+                           "excluded. Set graph_per_layer_cap=0 for full coverage.")
+    if "graph_quality" in tables:
+        gq = _sql(lib, "SELECT layer_id, unit_type, coverage FROM graph_quality "
+                       "ORDER BY layer_id, unit_type")
+        if not gq.empty and gq["coverage"].min() < 0.999:
+            st.caption("Per-layer graph coverage (fraction of units included):")
+            st.bar_chart(gq.pivot_table(index="layer_id", columns="unit_type",
+                                        values="coverage"))
+
+    #--- clustering health ----------------------------------------------
+    if "cluster_index" in tables:
+        st.subheader("Clustering health")
+        lv = _sql(lib, "SELECT cluster_level, count(*) n FROM cluster_index "
+                       "GROUP BY cluster_level ORDER BY n DESC")
+        giants = _sql(lib, "SELECT count(*) n FROM cluster_index "
+                           "WHERE giant_component_warning")
+        ng = int(giants.iloc[0]["n"]) if not giants.empty else 0
+        cols = st.columns(1 + (len(lv) if not lv.empty else 0))
+        cols[0].metric("Giant clusters", ng,
+                       help="Local clusters covering an outsized share of their "
+                            "layer/type — likely over-merged.")
+        if not lv.empty:
+            for i, row in enumerate(lv.itertuples(), start=1):
+                cols[i].metric(f"{row.cluster_level} clusters", int(row.n))
+        sizes = _sql(lib, "SELECT member_count FROM cluster_index "
+                          "WHERE cluster_level='local'")
+        if not sizes.empty:
+            st.caption("Local cluster size distribution:")
+            _hist(sizes, "member_count", "members per local cluster", bins=40)
+
+
+def _density_chart(aq: pd.DataFrame):
+    """Per-layer bitset density with the 0.25/0.50 trust thresholds drawn in."""
+    if not _HAS_ALT:
+        st.line_chart(aq.set_index("layer_id")[["median_bitset_density",
+                                                "median_activation_rate"]])
+        return
+    base = alt.Chart(aq)
+    dens = base.mark_line(point=True, color="#d62728").encode(
+        x=alt.X("layer_id:Q", title="layer"),
+        y=alt.Y("median_bitset_density:Q", title="density / rate",
+                scale=alt.Scale(domain=[0, 1])))
+    rate = base.mark_line(point=True, color="#1f77b4").encode(
+        x="layer_id:Q", y="median_activation_rate:Q")
+    rules = alt.Chart(pd.DataFrame({"y": [0.25, 0.5]})).mark_rule(
+        strokeDash=[4, 4], color="gray").encode(y="y:Q")
+    st.altair_chart((dens + rate + rules).properties(height=260), width="stretch")
+    st.caption("red = median bitset density · blue = median activation rate")
+
+
 def page_clusters(lib: str, tables: set[str]):
     st.header("Clusters")
     if "cluster_index" not in tables:
@@ -824,12 +947,15 @@ def main():
         st.stop()
 
     tables = _tables(lib)
-    page = st.sidebar.radio("View", ["Overview", "Plot Lab", "Clusters", "Units",
+    page = st.sidebar.radio("View", ["Overview", "Extraction Quality", "Plot Lab",
+                                     "Clusters", "Units",
                                      "Connection graph", "SQL console"])
     st.sidebar.caption(f"{len(tables)} tables available")
 
     if page == "Overview":
         page_overview(lib, tables)
+    elif page == "Extraction Quality":
+        page_extraction_quality(lib, tables)
     elif page == "Plot Lab":
         page_plotlab(lib, tables)
     elif page == "Clusters":
