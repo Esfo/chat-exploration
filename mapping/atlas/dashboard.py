@@ -20,6 +20,12 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+try:
+    import altair as alt  # ships with streamlit
+    _HAS_ALT = True
+except Exception:  # noqa: BLE001
+    _HAS_ALT = False
+
 #Allow running both as `streamlit run atlas/dashboard.py` and as a module.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -68,6 +74,21 @@ def _has(tables: set[str], *names: str) -> bool:
     return all(n in tables for n in names)
 
 
+def _hist(df: pd.DataFrame, col: str, title: str, bins: int = 40):
+    """Altair histogram of a numeric column, falling back to a bar chart."""
+    if df.empty or col not in df.columns:
+        return
+    if _HAS_ALT:
+        chart = (alt.Chart(df.dropna(subset=[col]))
+                 .mark_bar()
+                 .encode(alt.X(f"{col}:Q", bin=alt.Bin(maxbins=bins), title=title),
+                         alt.Y("count()", title="count"))
+                 .properties(height=240))
+        st.altair_chart(chart, use_container_width=True)
+    else:
+        st.bar_chart(df[col])
+
+
 #======================================================================
 # Pages
 #======================================================================
@@ -109,6 +130,29 @@ def page_overview(lib: str, tables: set[str]):
             mcols[i].metric(label, int(n.iloc[0]["c"]) if not n.empty else 0)
         else:
             mcols[i].metric(label, "—")
+
+    #Visual breakdowns.
+    if "unit_index" in tables:
+        st.subheader("Units per layer")
+        perlayer = _sql(lib, "SELECT layer_id, count(*) units FROM unit_index "
+                             "GROUP BY layer_id ORDER BY layer_id")
+        if not perlayer.empty:
+            st.bar_chart(perlayer.set_index("layer_id"))
+
+    if _has(tables, "unit_index", "activation_stats"):
+        c1, c2 = st.columns(2)
+        with c1:
+            st.subheader("Activation-rate distribution")
+            ar = _sql(lib, "SELECT activation_rate FROM activation_stats "
+                           "WHERE activation_rate IS NOT NULL")
+            _hist(ar, "activation_rate", "activation rate")
+        with c2:
+            st.subheader("Mean activation rate by layer")
+            mbl = _sql(lib, "SELECT u.layer_id, avg(a.activation_rate) mean_rate "
+                            "FROM unit_index u JOIN activation_stats a USING (unit_id) "
+                            "GROUP BY u.layer_id ORDER BY u.layer_id")
+            if not mbl.empty:
+                st.line_chart(mbl.set_index("layer_id"))
 
     #Cluster levels breakdown.
     if "cluster_index" in tables:
@@ -155,6 +199,24 @@ def page_clusters(lib: str, tables: set[str]):
     else:
         q = f"SELECT * FROM cluster_index c {where} ORDER BY member_count DESC LIMIT 500"
     df = _sql(lib, q)
+
+    #Role landscape: source vs sink, sized by membership, colored by level.
+    if _HAS_ALT and _has(tables, "cluster_stats") and \
+            {"source_score", "sink_score"}.issubset(df.columns) and not df.empty:
+        st.subheader("Cluster role landscape")
+        st.caption("Right = pushes signal out (source) · Up = receives (sink) · "
+                   "size = members")
+        scatter = (alt.Chart(df.dropna(subset=["source_score", "sink_score"]))
+                   .mark_circle(opacity=0.6)
+                   .encode(x=alt.X("source_score:Q", title="source score"),
+                           y=alt.Y("sink_score:Q", title="sink score"),
+                           size=alt.Size("member_count:Q", title="members"),
+                           color=alt.Color("cluster_level:N", title="level"),
+                           tooltip=["cluster_id", "dominant_unit_type", "member_count",
+                                    "source_score", "sink_score", "relay_score"])
+                   .interactive().properties(height=360))
+        st.altair_chart(scatter, use_container_width=True)
+
     st.caption(f"{len(df)} clusters (top 500 by size)")
     st.dataframe(df, use_container_width=True, height=300)
 
@@ -165,6 +227,18 @@ def page_clusters(lib: str, tables: set[str]):
         return
 
     q_obj, _ = _connect(lib)
+
+    #Role profile of the selected cluster.
+    if "cluster_stats" in tables:
+        roles = _sql(lib, "SELECT source_score, sink_score, relay_score, routing_score "
+                          "FROM cluster_stats WHERE cluster_id = ?", [cid])
+        if not roles.empty:
+            st.subheader("Role profile")
+            prof = roles.iloc[0].rename({"source_score": "source", "sink_score": "sink",
+                                         "relay_score": "relay",
+                                         "routing_score": "routing"})
+            st.bar_chart(prof)
+
     left, right = st.columns(2)
     with left:
         st.subheader("Members")
@@ -218,6 +292,9 @@ def page_units(lib: str, tables: set[str]):
         q = f"SELECT unit_id, layer_id, unit_type FROM unit_index u {where} LIMIT 500"
     df = _sql(lib, q)
     st.caption(f"Showing up to 500 units, ranked by {sort_by}")
+    if sort_by in df.columns:
+        st.subheader(f"Distribution of {sort_by} (shown units)")
+        _hist(df, sort_by, sort_by)
     st.dataframe(df, use_container_width=True, height=300)
 
     if df.empty:
@@ -241,6 +318,27 @@ def _unit_detail(lib: str, tables: set[str], uid: str):
             m[1].metric("Specificity", f"{row.get('specificity_score', 0):.3f}")
             m[2].metric("Burstiness", f"{row.get('burstiness_score', 0):.3f}")
             m[3].metric("Observed tokens", int(row.get("observed_tokens", 0)))
+
+    #Per-unit activation histogram (stored as arrays in activation_histograms).
+    if "activation_histograms" in tables:
+        h = _sql(lib, "SELECT bin_left, bin_right, count FROM activation_histograms "
+                      "WHERE unit_id = ?", [uid])
+        if not h.empty:
+            try:
+                row = h.iloc[0]
+                centers = [(a + b) / 2 for a, b in zip(row["bin_left"], row["bin_right"])]
+                hist_df = pd.DataFrame({"activation": centers, "count": list(row["count"])})
+                st.write("**Activation value distribution**")
+                if _HAS_ALT:
+                    chart = (alt.Chart(hist_df).mark_bar()
+                             .encode(x=alt.X("activation:Q", title="activation value"),
+                                     y=alt.Y("count:Q"))
+                             .properties(height=220))
+                    st.altair_chart(chart, use_container_width=True)
+                else:
+                    st.bar_chart(hist_df.set_index("activation"))
+            except Exception as e:  # noqa: BLE001
+                st.caption(f"Could not render histogram: {e}")
 
     left, right = st.columns(2)
     with left:
@@ -275,6 +373,25 @@ def page_graph(lib: str, tables: set[str]):
     if "unit_edges_combined" not in tables:
         st.info("No unit_edges_combined in this library.")
         return
+    #Layer-to-layer signal flow heatmap.
+    flow = _sql(lib, "SELECT source_layer, target_layer, count(*) edges, "
+                     "sum(combined_score) score FROM unit_edges_combined "
+                     "GROUP BY source_layer, target_layer")
+    if not flow.empty:
+        st.subheader("Layer-to-layer signal flow")
+        if _HAS_ALT:
+            heat = (alt.Chart(flow).mark_rect()
+                    .encode(x=alt.X("source_layer:O", title="source layer"),
+                            y=alt.Y("target_layer:O", title="target layer"),
+                            color=alt.Color("score:Q", title="Σ combined score",
+                                            scale=alt.Scale(scheme="magma")),
+                            tooltip=["source_layer", "target_layer", "edges", "score"])
+                    .properties(height=420))
+            st.altair_chart(heat, use_container_width=True)
+        else:
+            st.dataframe(flow, use_container_width=True)
+
+    st.subheader("Top edges")
     min_conf = st.slider("Minimum edge confidence", 0.0, 1.0, 0.0, 0.05)
     df = _sql(lib, "SELECT source_unit_id, target_unit_id, source_layer, target_layer, "
                    "combined_score, edge_confidence FROM unit_edges_combined "
