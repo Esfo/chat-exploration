@@ -61,7 +61,7 @@ def run(library: Library, backend: ModelBackend, batch_size: int | None = None,
           f"{n_units} units in {n_batches} batches (batch_size={batch_size}). "
           f"This is the heavy stage; forward passes use all cores via BLAS.",
           flush=True)
-    prog = Progress("capture-activations", n_batches)
+    prog = Progress("capture-activations", n_batches, step_label="batch")
     tokens_seen = 0
 
     for start in range(0, total, batch_size):

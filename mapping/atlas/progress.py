@@ -1,8 +1,9 @@
 """Small, thread-safe progress reporter for long-running stages.
 
 Stages that iterate over many items (tensors, layers, capture batches) use this
-to print uniform, informative lines: count, percent, elapsed, ETA, and an
-optional throughput/detail suffix. It is safe to ``tick`` from worker threads.
+to print uniform lines: count, percent, the time the last step took, total
+elapsed, and an optional throughput/detail suffix. It is safe to ``tick`` from
+worker threads.
 """
 
 from __future__ import annotations
@@ -25,12 +26,14 @@ def fmt_duration(seconds: float) -> str:
 class Progress:
     """Thread-safe counter that prints a formatted progress line on each tick."""
 
-    def __init__(self, label: str, total: int, every: int = 1):
+    def __init__(self, label: str, total: int, every: int = 1, step_label: str = "step"):
         self.label = label
         self.total = max(total, 1)
         self.every = max(every, 1)
+        self.step_label = step_label
         self.n = 0
         self.start = time.time()
+        self._last = self.start  # time of the previous printed line
         self._lock = threading.Lock()
 
     def tick(self, inc: int = 1, extra: str = "") -> None:
@@ -49,12 +52,13 @@ class Progress:
             print(msg, flush=True)
 
     def _emit(self, extra: str = "") -> None:
-        elapsed = time.time() - self.start
+        now = time.time()
+        step = now - self._last  # time taken since the previous printed line
+        self._last = now
+        elapsed = now - self.start
         pct = 100.0 * self.n / self.total
-        rate = self.n / elapsed if elapsed else 0.0
-        eta = (self.total - self.n) / rate if rate else 0.0
         msg = (f"[{self.label}] {self.n}/{self.total} ({pct:4.0f}%)  "
-               f"elapsed {fmt_duration(elapsed)}  ETA {fmt_duration(eta)}")
+               f"{self.step_label} {fmt_duration(step)}  elapsed {fmt_duration(elapsed)}")
         if extra:
             msg += f"  {extra}"
         print(msg, flush=True)
