@@ -21,6 +21,7 @@ import numpy as np
 
 from ..manifest import Library
 from ..model_backend import ModelBackend
+from ..parallel import resolve_workers
 from ..progress import Progress
 from ..sketches import ActiveBitset
 from ..storage import read_parquet, read_zarr_group, read_zarr_str
@@ -29,6 +30,54 @@ from . import register
 #Per-byte popcount lookup, so bitset overlap is a vectorized table lookup
 #instead of an unpackbits allocation per edge.
 _POPCOUNT = np.array([bin(i).count("1") for i in range(256)], dtype=np.int32)
+
+#Read-only arrays shared with worker processes via fork (copy-on-write), so the
+#multi-hundred-MB signature/bitset tables are never pickled per task.
+_SHARED: dict = {}
+
+
+def _layer_edges(src_layer):
+    """Compute activation edges for one source layer as columnar arrays.
+
+    Returns (source_pos, target_pos, score, activation_score) — unit *positions*
+    (mapped to ids by the parent) plus scores, all NumPy so it pickles cheaply.
+    """
+    S = _SHARED
+    sig, bits, by_layer, layers = S["sig"], S["bits"], S["by_layer"], S["layers"]
+    layer_window, top_k = S["layer_window"], S["top_k"]
+    min_score, chunk = S["min_score"], S["chunk"]
+
+    src_idx = np.array(by_layer[src_layer])
+    if not len(src_idx):
+        z = np.empty(0, np.int64)
+        return z, z, np.empty(0, np.float64), np.empty(0, np.float64)
+    tgt_idx = np.array([i for tl in layers
+                        if abs(tl - src_layer) <= layer_window
+                        for i in by_layer[tl]])
+    tgt_sig = sig[tgt_idx]
+    sp_l, tp_l, sc_l, act_l = [], [], [], []
+    for c0 in range(0, len(src_idx), chunk):
+        cidx = src_idx[c0:c0 + chunk]
+        sims = sig[cidx] @ tgt_sig.T  # cosine (signatures are unit-norm)
+        k = min(top_k, sims.shape[1])
+        #Top-k without negating the whole [chunk x targets] block (saves a large
+        #copy per chunk): partition for the k largest, then keep that slice.
+        part = np.argpartition(sims, sims.shape[1] - k, axis=1)[:, -k:]
+        sc = np.take_along_axis(sims, part, axis=1).ravel()
+        sp = np.repeat(cidx, k)
+        tp = tgt_idx[part].ravel()
+        if bits is not None:
+            inter = _POPCOUNT[bits[sp] & bits[tp]].sum(axis=1)
+            union = _POPCOUNT[bits[sp] | bits[tp]].sum(axis=1)
+            ov = np.where(union > 0, inter / np.maximum(union, 1), 0.0)
+        else:
+            ov = np.zeros(sp.shape[0])
+        keep = (sc >= min_score) & (sp != tp)
+        sp, tp, sc, ov = sp[keep], tp[keep], sc[keep], ov[keep]
+        sp_l.append(sp); tp_l.append(tp); sc_l.append(sc); act_l.append(0.5 * sc + 0.5 * ov)
+    cat = lambda parts, dt: np.concatenate(parts) if parts else np.empty(0, dt)
+    return (cat(sp_l, np.int64), cat(tp_l, np.int64),
+            cat(sc_l, np.float64), cat(act_l, np.float64))
 
 
 @register("build-graphs", 8,
@@ -81,41 +130,36 @@ def run(library: Library, backend: ModelBackend, layer_window: int | None = None
           f"{' (sampled)' if sampled else ' (full coverage)'}", flush=True)
     prog = Progress("build-graphs", total_sources, every=chunk, step_label="batch")
 
-    #Accumulate edges as columnar arrays per chunk, concatenated once at the end.
+    #Accumulate edges as columnar arrays, one task per source layer. Layers are
+    #independent, so we fan them out across processes; on Linux fork shares the
+    #big sig/bits arrays copy-on-write (no pickling), and each task returns only
+    #compact NumPy arrays.
+    _SHARED.update(sig=sig, bits=bits, by_layer=by_layer, layers=layers,
+                   layer_window=layer_window, top_k=config.edges_top_k,
+                   min_score=min_score, chunk=chunk)
+    #Only fan out for real workloads; small/test runs stay serial (no fork cost).
+    workers = 1 if total_sources < 20000 else min(resolve_workers(), 8, len(layers))
     src_parts, tgt_parts, score_parts, act_parts = [], [], [], []
-    for src_layer in layers:
-        src_idx = np.array(by_layer[src_layer])
-        if not len(src_idx):
-            continue
-        #Neighborhood window includes same and nearby layers (co-firing is local).
-        tgt_idx = np.array([i for tl in layers
-                            if abs(tl - src_layer) <= layer_window
-                            for i in by_layer[tl]])
-        tgt_sig = sig[tgt_idx]
-        #Chunk the sources so the similarity block never materializes the full
-        #[units x targets] matrix — bounded memory at full coverage (Issue 7).
-        for c0 in range(0, len(src_idx), chunk):
-            cidx = src_idx[c0:c0 + chunk]
-            sims = sig[cidx] @ tgt_sig.T  # cosine (signatures are unit-norm)
-            m = sims.shape[0]
-            k = min(config.edges_top_k, sims.shape[1])
-            top = np.argpartition(-sims, k - 1, axis=1)[:, :k]  # [m, k] tgt-array idx
-            sc = np.take_along_axis(sims, top, axis=1).ravel()  # [m*k] scores
-            sp = np.repeat(cidx, k)                              # source unit positions
-            tp = tgt_idx[top].ravel()                           # target unit positions
-            #Vectorized co-firing overlap for the whole chunk at once (popcount on
-            #packed bytes — no per-edge unpackbits, no Python edge loop).
-            if bits is not None:
-                inter = _POPCOUNT[bits[sp] & bits[tp]].sum(axis=1)
-                union = _POPCOUNT[bits[sp] | bits[tp]].sum(axis=1)
-                ov = np.where(union > 0, inter / np.maximum(union, 1), 0.0)
-            else:
-                ov = np.zeros(sp.shape[0])
-            keep = (sc >= min_score) & (sp != tp)
-            sp, tp, sc, ov = sp[keep], tp[keep], sc[keep], ov[keep]
-            src_parts.append(sp); tgt_parts.append(tp)
-            score_parts.append(sc); act_parts.append(0.5 * sc + 0.5 * ov)
-            prog.tick(len(cidx), extra=f"L{src_layer}")
+
+    def _collect(res, src_layer):
+        sp_, tp_, sc_, act_ = res
+        src_parts.append(sp_); tgt_parts.append(tp_)
+        score_parts.append(sc_); act_parts.append(act_)
+        prog.tick(len(by_layer[src_layer]), extra=f"L{src_layer} done")
+
+    if workers <= 1:
+        for src_layer in layers:
+            _collect(_layer_edges(src_layer), src_layer)
+    else:
+        import multiprocessing as mp
+        from concurrent.futures import ProcessPoolExecutor
+        ctx = mp.get_context("fork")
+        print(f"[build-graphs] fanning {len(layers)} layers across {workers} processes", flush=True)
+        with ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as ex:
+            futs = {ex.submit(_layer_edges, l): l for l in layers}
+            from concurrent.futures import as_completed
+            for fut in as_completed(futs):
+                _collect(fut.result(), futs[fut])
     prog.done()
 
     print("[build-graphs] assembling edge tables…", flush=True)
