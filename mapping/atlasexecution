@@ -24,7 +24,11 @@ LIBRARY_DIR="$DATA_ROOT/atlas_library"
 #raise it once you've confirmed an end-to-end run completes. A GPU that fits the
 #model is the only way to make large token budgets fast.
 TARGET_TOKENS="${TARGET_TOKENS:-50000}"
-BATCH_SIZE="${BATCH_SIZE:-4}"
+#Capture batch size. On CPU a larger batch gives BLAS bigger matmuls and spends
+#proportionally less time in the single-threaded between-batch accumulation, so
+#cores stay busier — raise it if you have memory headroom. It does not reduce
+#total forward-pass FLOPs (that scales with tokens), only overhead/utilization.
+BATCH_SIZE="${BATCH_SIZE:-8}"
 
 #Cap MLP neurons per layer to bound capture's per-batch CPU overhead and memory
 #(0 = all). Capping does not reduce forward-pass time, only the accumulation work.
@@ -57,7 +61,8 @@ python3 -m atlas.cli --out "$LIBRARY_DIR" --threads "$THREADS" init \
   --max-mlp-neurons-per-layer "$MAX_MLP_NEURONS_PER_LAYER" \
   $DEQUANT_FLAG
 
-python3 -m atlas.cli --out "$LIBRARY_DIR" --threads "$THREADS" run-all
+python3 -m atlas.cli --out "$LIBRARY_DIR" --threads "$THREADS" run-all \
+  --batch-size "$BATCH_SIZE"
 
 echo
 echo "Library written to: $LIBRARY_DIR"

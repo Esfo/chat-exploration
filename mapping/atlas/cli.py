@@ -158,6 +158,8 @@ def build_parser() -> argparse.ArgumentParser:
     runall = sub.add_parser("run-all", help="run the full V1 pipeline in order")
     runall.add_argument("--force", action="store_true",
                         help="rerun every stage even if its outputs already exist")
+    runall.add_argument("--batch-size", dest="batch_size", type=int, default=None,
+                        help="capture batch size (larger keeps CPU cores busier)")
     return p
 
 
