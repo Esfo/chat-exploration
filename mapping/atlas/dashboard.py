@@ -506,6 +506,12 @@ def page_plotlab(lib: str, tables: set[str]):
     #--- chart spec -----------------------------------------------------
     chart_type = st.selectbox(
         "Chart type", ["Histogram", "Scatter", "Bar", "Line", "Box", "Heatmap", "Table"])
+
+    #Histogram manages its own (full, per-group) querying — see _histogram.
+    if chart_type == "Histogram":
+        _histogram(lib, base_sql, where_sql, schema, none)
+        return
+
     limit = st.slider("Max rows to load", 1000, 200000, 20000, step=1000)
 
     #--- fetch ----------------------------------------------------------
@@ -524,8 +530,6 @@ def page_plotlab(lib: str, tables: set[str]):
     #--- render ---------------------------------------------------------
     if chart_type == "Table" or not _HAS_ALT:
         st.dataframe(df, use_container_width=True, height=500)
-    elif chart_type == "Histogram":
-        _histogram(df, numeric_cols, all_cols, none)
     else:
         enc: dict[str, str] = {}
         c1, c2, c3, c4 = st.columns(4)
@@ -556,90 +560,131 @@ def page_plotlab(lib: str, tables: set[str]):
                        "text/csv")
 
 
-def _histogram(df, numeric_cols, all_cols, none):
-    """Overlaid per-group histograms (X = value binned, Y = count/density)."""
-    if not numeric_cols:
+def _histogram(lib, base_sql, where_sql, schema, none):
+    """Overlaid per-group histograms that query the FULL data per chosen group.
+
+    Unlike the other chart types (which plot a capped sample), this pulls every
+    row for the selected groups so per-cluster distributions are complete, and it
+    excludes the unassigned (null) group by default so it doesn't swamp the rest.
+    """
+    numeric = [c for c, isnum in schema.items() if isnum]
+    allcols = list(schema)
+    if not numeric:
         st.warning("This dataset has no numeric columns to bin. For weight "
-                   "distributions, pick the **units — …** dataset and an X such as "
-                   "`write_norm` or `read_norm`.")
+                   "distributions pick the **units — …** dataset and X = "
+                   "**write_norm** or **read_norm** (those are the weight magnitudes; "
+                   "*_kurtosis is a shape stat, not a weight).")
         return
 
     c1, c2 = st.columns(2)
-    x = c1.selectbox("Value to bin (X axis)", numeric_cols)
-    group = c2.selectbox("Separate histogram per … (color)", [none] + all_cols)
+    x = c1.selectbox("Value to bin (X axis)", numeric)
+    group = c2.selectbox("Separate histogram per … (color)", [none] + allcols)
 
     o1, o2, o3, o4 = st.columns(4)
     nbins = o1.slider("Bins", 5, 250, 40)
     binwidth = o2.number_input("Exact bin width (0 = auto)", min_value=0.0, value=0.0)
-    opacity = o3.slider("Opacity", 0.1, 1.0, 0.55, 0.05)
+    opacity = o3.slider("Opacity", 0.1, 1.0, 0.6, 0.05)
     log_y = o4.checkbox("Log Y", value=False)
     norm = st.radio("Y axis", ["count", "density (normalized per group)"],
                     horizontal=True)
     show_kde = st.checkbox("Overlay smooth KDE curve", value=False)
 
-    keep = [x] + ([group] if group != none else [])
-    data = df[keep].copy()
+    #--- choose which groups (from the FULL data, not a sample) ----------
+    chosen: list[str] = []
+    include_null = False
+    if group != none:
+        gv = _sql(lib, f"SELECT CAST({group} AS VARCHAR) g, count(*) n "
+                       f"FROM ({base_sql}) _t{where_sql} GROUP BY 1 ORDER BY n DESC "
+                       f"LIMIT 3000")
+        if gv.empty:
+            st.warning("No data for this dataset.")
+            return
+        if int(gv["n"].max()) <= 1:
+            st.warning(
+                f"Each value of **{group}** has only one row, so there's no "
+                f"within-group distribution to histogram.\n\n"
+                f"• To compare clusters by an **aggregate** weight, use the "
+                f"**clusters** dataset, set color to **(none)**, and pick "
+                f"X = **mean_write_norm** (or mean_read_norm).\n"
+                f"• For the weight distribution of the **units inside** clusters, use "
+                f"the **units** dataset (X = write_norm, color = cluster_id).")
+            return
+        opts = [g for g in gv.dropna(subset=["g"])["g"].tolist()
+                if g not in ("None", "nan")]
+        chosen = st.multiselect(
+            f"Which {group} values to overlay ({len(opts)} available, largest first)",
+            opts, default=opts[: min(6, len(opts))])
+        include_null = st.checkbox("include unassigned (null) group", value=False)
+        if not chosen and not include_null:
+            st.info("Pick at least one group to plot.")
+            return
+
+    #--- fetch full rows for those groups -------------------------------
+    conds = [f"{x} IS NOT NULL"]
+    params: list = []
+    select_cols = x
+    if group != none:
+        select_cols += f", CAST({group} AS VARCHAR) AS __g"
+        gsel = []
+        if chosen:
+            ph = ",".join(["?"] * len(chosen))
+            gsel.append(f"CAST({group} AS VARCHAR) IN ({ph})")
+            params += chosen
+        if include_null:
+            gsel.append(f"{group} IS NULL")
+        conds.append("(" + " OR ".join(gsel) + ")")
+    extra = (" AND " if where_sql else " WHERE ") + " AND ".join(conds)
+    q = f"SELECT {select_cols} FROM ({base_sql}) _t{where_sql}{extra} LIMIT 500000"
+    with st.expander("Generated SQL"):
+        st.code(q, language="sql")
+    data = _sql(lib, q, params)
+    if data.empty:
+        st.warning("No rows matched.")
+        return
     data[x] = pd.to_numeric(data[x], errors="coerce")
     data = data.replace([np.inf, -np.inf], np.nan).dropna(subset=[x])
     if data.empty:
-        st.warning("No numeric values in the selected column (all null/inf).")
+        st.warning("Selected column has no finite numeric values.")
         return
+    gcol = "__g" if group != none else None
+    if gcol:
+        data["__g"] = data["__g"].fillna("(unassigned)")
+    st.caption(f"{len(data):,} rows · "
+               f"{data['__g'].nunique() if gcol else 1} distribution(s)")
 
-    #Guard the common confusion: a one-row-per-group dataset can't form a
-    #distribution. Steer the user to the units dataset.
-    if group != none:
-        data[group] = data[group].astype(str)
-        per_group = data.groupby(group)[x].size()
-        if per_group.max() <= 1:
-            st.warning("Each selected group has only one value, so there's no "
-                       "distribution to histogram. This usually means you're on a "
-                       "summary dataset (one row per cluster). Switch the **Dataset** "
-                       "to **units — …** to histogram per-unit values within clusters.")
-            return
-        opts = data[group].value_counts().index.tolist()
-        chosen = st.multiselect(
-            f"Which {group} values to overlay ({len(opts)} available)",
-            opts, default=opts[: min(6, len(opts))])
-        if not chosen:
-            st.info("Pick at least one group to plot.")
-            return
-        data = data[data[group].isin(chosen)]
-
-    #Altair-native binning — robust, well-tested rendering.
+    #--- render (Altair native binning, overlaid via stack=None) --------
     bin_opts = alt.Bin(step=binwidth) if binwidth and binwidth > 0 \
         else alt.Bin(maxbins=int(nbins))
     yscale = alt.Scale(type="log") if log_y else alt.Scale()
-    color_enc = (alt.Color(f"{group}:N", title=group) if group != none
-                 else alt.value("#4C78A8"))
+    color_enc = alt.Color("__g:N", title=group) if gcol else alt.value("#4C78A8")
+    density = not norm.startswith("count")
 
-    if norm.startswith("count"):
-        y = alt.Y("count():Q", stack=None, scale=yscale, title="count")
-    else:
-        #Fraction within each group: count() / group total.
-        y = alt.Y("__frac:Q", stack=None, scale=yscale, title="density (per group)")
-
-    base = alt.Chart(data)
-    if not norm.startswith("count"):
-        grp_field = group if group != none else None
-        base = base.transform_bin("__bin", field=x, bin=bin_opts)
-        gb = ["__bin"] + ([grp_field] if grp_field else [])
-        base = (base.transform_aggregate(__c="count()", groupby=gb)
+    if density:
+        gb = ["__bin"] + ([gcol] if gcol else [])
+        base = (alt.Chart(data)
+                .transform_bin("__bin", field=x, bin=bin_opts)
+                .transform_aggregate(__c="count()", groupby=gb)
                 .transform_joinaggregate(__t="sum(__c)",
-                                         groupby=([grp_field] if grp_field else []))
+                                         groupby=([gcol] if gcol else []))
                 .transform_calculate(__frac="datum.__c / datum.__t"))
+        tt = [alt.Tooltip("__bin:Q", title=x), alt.Tooltip("__frac:Q", format=".3f")]
+        if gcol:
+            tt.append(alt.Tooltip("__g:N", title=group))
         bars = base.mark_bar(opacity=opacity).encode(
-            x=alt.X("__bin:Q", title=x), x2="__bin_end:Q", y=y, color=color_enc,
-            tooltip=["__bin:Q", alt.Tooltip("__frac:Q", format=".3f")])
+            x=alt.X("__bin:Q", title=x), x2="__bin_end:Q",
+            y=alt.Y("__frac:Q", stack=None, scale=yscale, title="fraction per group"),
+            color=color_enc, tooltip=tt)
     else:
-        tt = [alt.Tooltip(f"{x}:Q", bin=bin_opts, title=x), alt.Tooltip("count():Q")]
-        if group != none:
-            tt.append(alt.Tooltip(f"{group}:N"))
-        bars = base.mark_bar(opacity=opacity).encode(
-            x=alt.X(f"{x}:Q", bin=bin_opts, title=x), y=y, color=color_enc, tooltip=tt)
+        tt = [alt.Tooltip(f"{x}:Q", bin=bin_opts, title=x),
+              alt.Tooltip("count():Q", title="count")]
+        if gcol:
+            tt.append(alt.Tooltip("__g:N", title=group))
+        bars = alt.Chart(data).mark_bar(opacity=opacity).encode(
+            x=alt.X(f"{x}:Q", bin=bin_opts, title=x),
+            y=alt.Y("count():Q", stack=None, scale=yscale, title="count"),
+            color=color_enc, tooltip=tt)
 
     layers = [bars]
-
-    #Optional KDE overlay (numpy), scaled to match the count axis.
     if show_kde:
         lo, hi = float(data[x].min()), float(data[x].max())
         if hi <= lo:
@@ -647,25 +692,29 @@ def _histogram(df, numeric_cols, all_cols, none):
         width = binwidth if (binwidth and binwidth > 0) else (hi - lo) / max(nbins, 1)
         grid = np.linspace(lo, hi, 256)
         krows = []
-        giter = (data.groupby(group) if group != none else [("all", data)])
+        giter = data.groupby("__g") if gcol else [("all", data)]
         for gname, gdf in giter:
             vals = gdf[x].to_numpy()
+            if vals.size < 5:
+                continue  # too few points for a meaningful curve
             dens = _kde(vals, grid, 1.0)
             if dens is None:
                 continue
-            scale = 1.0 if not norm.startswith("count") else vals.size * width
+            scale = width if density else vals.size * width
             for gx, gy in zip(grid, dens * scale):
-                krows.append({"x": float(gx), "value": float(gy), "group": str(gname)})
+                krows.append({"x": float(gx), "value": float(gy), "__g": str(gname)})
         if krows:
             kdf = pd.DataFrame(krows)
             if log_y:
                 kdf = kdf[kdf["value"] > 0]
-            kcolor = alt.Color("group:N") if group != none else alt.value("#E45756")
+            kcolor = alt.Color("__g:N", title=group) if gcol else alt.value("#E45756")
             layers.append(alt.Chart(kdf).mark_line(strokeWidth=2).encode(
                 x="x:Q", y=alt.Y("value:Q", scale=yscale), color=kcolor))
 
     st.altair_chart(alt.layer(*layers).resolve_scale(color="shared")
-                    .properties(height=470).interactive(), use_container_width=True)
+                    .properties(height=480).interactive(), use_container_width=True)
+    st.download_button("Download CSV", data.to_csv(index=False),
+                       "atlas_histogram.csv", "text/csv")
 
 
 def _kde(values, grid, bw_mult):
