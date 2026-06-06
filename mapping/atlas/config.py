@@ -107,11 +107,28 @@ class ExtractionConfig:
         }
     )
 
-    #--- clustering ---
+    #--- graph coverage (Issue 7) ---
+    #Units considered per layer when building the activation graph. 0 = all units
+    #(memory stays bounded via chunked similarity); a positive value caps coverage
+    #and is recorded so the dashboard can show sampling honestly.
+    graph_per_layer_cap: int = 0
+    graph_layer_window: int = 3
+    #Source chunk size for the chunked top-k edge computation.
+    graph_source_chunk: int = 512
+
+    #--- clustering (Issue 6) ---
     local_resolution: float = 1.0
     xlayer_resolution: float = 1.0
     clustering_algorithm: str = "leiden_or_agglomerative"
     min_cluster_size: int = 3
+    #Only union two units if they are *mutual* top-k neighbours, which stops weak
+    #bridge edges from merging everything into one giant component.
+    mutual_knn: bool = True
+    #Minimum activation-edge score to use an edge for clustering.
+    cluster_edge_min_score: float = 0.0
+    #Flag a local cluster as a suspicious giant if it covers more than this
+    #fraction of its (layer, unit_type) population.
+    giant_component_fraction: float = 0.5
 
     #--- unit selection ---
     include_mlp_neurons: bool = True
@@ -191,6 +208,8 @@ LAYOUT = {
         "graphs/unit_edges_combined.parquet",
         "graphs/cluster_edges.parquet",
         "graphs/graph_partitions.parquet",
+        "graphs/graph_participation.parquet",
+        "graphs/graph_meta.parquet",
     ],
     "clusters": [
         "clusters/cluster_index.parquet",

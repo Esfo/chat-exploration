@@ -68,13 +68,30 @@ def run(library: Library, backend: ModelBackend, **kwargs):
     index_rows, membership_rows, hierarchy_rows, exemplar_rows = [], [], [], []
 
     #--- level 1: local clusters ----------------------------------------
+    #(Issue 6) Mutual-kNN: only union two units when each is in the other's
+    #top-k activation neighbours, so weak one-directional bridge edges cannot
+    #merge unrelated units into one giant component.
+    same_group = (lambda s, t: layer_of[s] == layer_of[t]
+                  and type_of[s] == type_of[t])
+    directed = set()
+    for e in act_edges:
+        s, t = e["source_unit_id"], e["target_unit_id"]
+        if same_group(s, t) and e.get("activation_score", 1.0) >= config.cluster_edge_min_score:
+            directed.add((s, t))
+
     uf = UnionFind()
     for u in units:
         uf.find(u["unit_id"])  # ensure singletons exist
-    for e in act_edges:
-        s, t = e["source_unit_id"], e["target_unit_id"]
-        if layer_of[s] == layer_of[t] and type_of[s] == type_of[t]:
-            uf.union(s, t)
+    for (s, t) in directed:
+        if config.mutual_knn and (t, s) not in directed:
+            continue  # keep only mutual neighbours
+        uf.union(s, t)
+    algo = "mutual_knn_components" if config.mutual_knn else "union_find_components"
+
+    #Population per (layer, unit_type) to flag suspiciously giant components.
+    pop: dict[tuple, int] = {}
+    for u in units:
+        pop[(u["layer_id"], u["unit_type"])] = pop.get((u["layer_id"], u["unit_type"]), 0) + 1
 
     local_of_unit: dict[str, str] = {}
     local_clusters: dict[str, list[str]] = {}
@@ -85,8 +102,11 @@ def run(library: Library, backend: ModelBackend, **kwargs):
         layers = [layer_of[m] for m in members]
         types = [type_of[m] for m in members]
         dom_type = max(set(types), key=types.count)
+        giant = len(members) > config.giant_component_fraction * pop.get(
+            (layers[0], dom_type), len(members))
         index_rows.append(_cluster_row(cid, "local", "co_firing", "", layers,
-                                       dom_type, len(members), config.local_resolution))
+                                       dom_type, len(members), config.local_resolution,
+                                       algo=algo, giant=giant))
         for rank, m in enumerate(members):
             membership_rows.append(_member(cid, m, "unit", 1.0, rank))
             local_of_unit[m] = cid
@@ -176,7 +196,8 @@ def run(library: Library, backend: ModelBackend, **kwargs):
             "family": len(families)}
 
 
-def _cluster_row(cid, level, ctype, parent, layers, dom_type, member_count, resolution):
+def _cluster_row(cid, level, ctype, parent, layers, dom_type, member_count, resolution,
+                 algo="union_find_components", giant=False):
     return {
         "cluster_id": cid, "cluster_level": level, "cluster_type": ctype,
         "parent_cluster_id": parent,
@@ -184,7 +205,8 @@ def _cluster_row(cid, level, ctype, parent, layers, dom_type, member_count, reso
         "layer_max": int(max(layers)) if layers else -1,
         "dominant_layer": int(np.bincount(layers).argmax()) if layers else -1,
         "dominant_unit_type": dom_type, "member_count": int(member_count),
-        "clustering_algorithm": "union_find_components", "resolution": float(resolution),
+        "clustering_algorithm": algo, "resolution": float(resolution),
+        "giant_component_warning": bool(giant),
     }
 
 

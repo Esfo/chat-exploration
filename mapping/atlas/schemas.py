@@ -335,6 +335,27 @@ CLUSTER_INDEX = _schema([
     ("member_count", pa.int64()),
     ("clustering_algorithm", pa.string()),
     ("resolution", pa.float64()),
+    #True when a local cluster covers a suspiciously large share of its
+    #(layer, unit_type) population — a sign of bridge-edge over-merging (Issue 6).
+    ("giant_component_warning", pa.bool_()),
+])
+
+#Per-unit record of whether a unit was included in graph construction (Issue 7).
+GRAPH_PARTICIPATION = _schema([
+    ("unit_id", pa.string()),
+    ("layer_id", pa.int32()),
+    ("unit_type", pa.string()),
+    ("included_in_graph", pa.bool_()),
+])
+
+#Single-row metadata describing how the graph was built (Issue 7).
+GRAPH_META = _schema([
+    ("graph_sampled", pa.bool_()),
+    ("per_layer_cap", pa.int64()),
+    ("layer_window", pa.int32()),
+    ("candidate_generation_method", pa.string()),
+    ("total_units", pa.int64()),
+    ("included_units", pa.int64()),
 ])
 
 CLUSTER_MEMBERSHIP = _schema([
@@ -479,6 +500,8 @@ SCHEMA_REGISTRY: dict[str, pa.Schema] = {
     "graphs/unit_edges_combined.parquet": UNIT_EDGES_COMBINED,
     "graphs/cluster_edges.parquet": CLUSTER_EDGES,
     "graphs/graph_partitions.parquet": GRAPH_PARTITIONS,
+    "graphs/graph_participation.parquet": GRAPH_PARTICIPATION,
+    "graphs/graph_meta.parquet": GRAPH_META,
     "clusters/cluster_index.parquet": CLUSTER_INDEX,
     "clusters/cluster_membership.parquet": CLUSTER_MEMBERSHIP,
     "clusters/cluster_stats.parquet": CLUSTER_STATS,

@@ -29,10 +29,14 @@ from . import register
 @register("build-graphs", 8,
           requires=["activations/activation_sketches.zarr", "catalog/unit_index.parquet"],
           produces=["graphs/unit_edges_activation.parquet",
-                    "graphs/unit_edges_combined.parquet"])
-def run(library: Library, backend: ModelBackend, layer_window: int = 3,
-        per_layer_cap: int = 2048, **kwargs):
+                    "graphs/unit_edges_combined.parquet",
+                    "graphs/graph_participation.parquet",
+                    "graphs/graph_meta.parquet"])
+def run(library: Library, backend: ModelBackend, layer_window: int | None = None,
+        per_layer_cap: int | None = None, **kwargs):
     config = library.config()
+    layer_window = layer_window if layer_window is not None else config.graph_layer_window
+    per_layer_cap = per_layer_cap if per_layer_cap is not None else config.graph_per_layer_cap
     units = read_parquet(library.path("catalog/unit_index.parquet")).to_pylist()
     layer_of = {u["unit_id"]: u["layer_id"] for u in units}
     type_of = {u["unit_id"]: u["unit_type"] for u in units}
@@ -46,45 +50,69 @@ def run(library: Library, backend: ModelBackend, layer_window: int = 3,
     by_layer: dict[int, list[int]] = {}
     for uid in uids:
         by_layer.setdefault(layer_of[uid], []).append(pos[uid])
-    rng = np.random.default_rng(config.sketch_seed)
-    for l, idxs in by_layer.items():
-        if len(idxs) > per_layer_cap:
-            by_layer[l] = list(rng.choice(idxs, per_layer_cap, replace=False))
+
+    #Issue 7: only subsample if an explicit cap is set; record what was included.
+    sampled = bool(per_layer_cap and per_layer_cap > 0)
+    if sampled:
+        rng = np.random.default_rng(config.sketch_seed)
+        for l, idxs in by_layer.items():
+            if len(idxs) > per_layer_cap:
+                by_layer[l] = list(rng.choice(idxs, per_layer_cap, replace=False))
+    included = {uids[i] for idxs in by_layer.values() for i in idxs}
 
     activation_edges, lagged_edges, routing_edges = [], [], []
     layers = sorted(by_layer)
+    chunk = max(1, config.graph_source_chunk)
 
     for src_layer in layers:
         src_idx = np.array(by_layer[src_layer])
         if not len(src_idx):
             continue
-        src_sig = sig[src_idx]
         #Neighborhood window includes same and nearby layers (co-firing is local).
-        tgt_idx = [i for tl in layers
-                   if abs(tl - src_layer) <= layer_window
-                   for i in by_layer[tl]]
-        tgt_idx = np.array(tgt_idx)
-        sims = src_sig @ sig[tgt_idx].T  # cosine (signatures are unit-norm)
-        k = min(config.edges_top_k, sims.shape[1])
-        top = np.argpartition(-sims, k - 1, axis=1)[:, :k]
+        tgt_idx = np.array([i for tl in layers
+                            if abs(tl - src_layer) <= layer_window
+                            for i in by_layer[tl]])
+        tgt_sig = sig[tgt_idx]
+        #Chunk the sources so the similarity block never materializes the full
+        #[units x targets] matrix — bounded memory at full coverage (Issue 7).
+        for c0 in range(0, len(src_idx), chunk):
+            cidx = src_idx[c0:c0 + chunk]
+            sims = sig[cidx] @ tgt_sig.T  # cosine (signatures are unit-norm)
+            k = min(config.edges_top_k, sims.shape[1])
+            top = np.argpartition(-sims, k - 1, axis=1)[:, :k]
+            for si in range(sims.shape[0]):
+                su = uids[cidx[si]]
+                for tj in top[si]:
+                    tu = uids[tgt_idx[tj]]
+                    if su == tu:
+                        continue
+                    score = float(sims[si, tj])
+                    if score < config.edge_min_score:
+                        continue
+                    tl = layer_of[tu]
+                    overlap = _overlap(bitsets, cidx[si], tgt_idx[tj])
+                    act_score = 0.5 * score + 0.5 * overlap
+                    activation_edges.append(_edge(su, tu, src_layer, tl, "activation_score", act_score))
+                    if tl > src_layer:
+                        lagged_edges.append(_edge(su, tu, src_layer, tl, "lagged_score", score))
+                        if type_of[su] == "attn_head":
+                            routing_edges.append(_edge(su, tu, src_layer, tl, "attention_routing_score", score))
 
-        for si in range(sims.shape[0]):
-            su = uids[src_idx[si]]
-            for tj in top[si]:
-                tu = uids[tgt_idx[tj]]
-                if su == tu:
-                    continue
-                score = float(sims[si, tj])
-                if score < config.edge_min_score:
-                    continue
-                tl = layer_of[tu]
-                overlap = _overlap(bitsets, src_idx[si], tgt_idx[tj])
-                act_score = 0.5 * score + 0.5 * overlap
-                activation_edges.append(_edge(su, tu, src_layer, tl, "activation_score", act_score))
-                if tl > src_layer:
-                    lagged_edges.append(_edge(su, tu, src_layer, tl, "lagged_score", score))
-                    if type_of[su] == "attn_head":
-                        routing_edges.append(_edge(su, tu, src_layer, tl, "attention_routing_score", score))
+    #Coverage records so the dashboard can show graph honesty (Issue 7).
+    participation = [{"unit_id": u["unit_id"], "layer_id": u["layer_id"],
+                      "unit_type": u["unit_type"],
+                      "included_in_graph": u["unit_id"] in included} for u in units]
+    library.commit_table("graphs/graph_participation.parquet", participation,
+                         "graphs", "build-graphs")
+    library.commit_table("graphs/graph_meta.parquet", [{
+        "graph_sampled": sampled,
+        "per_layer_cap": int(per_layer_cap or 0),
+        "layer_window": int(layer_window),
+        "candidate_generation_method": ("random_per_layer_cap" if sampled
+                                        else "chunked_exact_topk"),
+        "total_units": len(units),
+        "included_units": len(included),
+    }], "graphs", "build-graphs")
 
     library.commit_table("graphs/unit_edges_activation.parquet", activation_edges, "graphs", "build-graphs")
     library.commit_table("graphs/unit_edges_lagged.parquet", lagged_edges, "graphs", "build-graphs")
