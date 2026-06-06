@@ -36,8 +36,41 @@ _POPCOUNT = np.array([bin(i).count("1") for i in range(256)], dtype=np.int32)
 _SHARED: dict = {}
 
 
+def _env_disabled(name):
+    import os
+    return os.environ.get(name, "").lower() in ("1", "true", "yes")
+
+
+def _window_targets(src_layer, layers, by_layer, layer_window):
+    return np.array([i for tl in layers
+                     if abs(tl - src_layer) <= layer_window
+                     for i in by_layer[tl]])
+
+
+def _chunk_edges(cidx, part, sc, tgt_idx, bits, min_score):
+    """Turn a chunk's top-k (positions ``part`` into ``tgt_idx``, scores ``sc``)
+    into filtered columnar edges with co-firing overlap folded into act score."""
+    k = part.shape[1]
+    sp = np.repeat(cidx, k)
+    tp = tgt_idx[part].ravel()
+    sc = np.ascontiguousarray(sc).ravel()
+    if bits is not None:
+        inter = _POPCOUNT[bits[sp] & bits[tp]].sum(axis=1)
+        union = _POPCOUNT[bits[sp] | bits[tp]].sum(axis=1)
+        ov = np.where(union > 0, inter / np.maximum(union, 1), 0.0)
+    else:
+        ov = np.zeros(sp.shape[0])
+    keep = (sc >= min_score) & (sp != tp)
+    sp, tp, sc, ov = sp[keep], tp[keep], sc[keep], ov[keep]
+    return sp, tp, sc, 0.5 * sc + 0.5 * ov
+
+
+def _cat(parts, dt):
+    return np.concatenate(parts) if parts else np.empty(0, dt)
+
+
 def _layer_edges(src_layer):
-    """Compute activation edges for one source layer as columnar arrays.
+    """Compute activation edges for one source layer as columnar arrays (CPU).
 
     Returns (source_pos, target_pos, score, activation_score) — unit *positions*
     (mapped to ids by the parent) plus scores, all NumPy so it pickles cheaply.
@@ -51,9 +84,7 @@ def _layer_edges(src_layer):
     if not len(src_idx):
         z = np.empty(0, np.int64)
         return z, z, np.empty(0, np.float64), np.empty(0, np.float64)
-    tgt_idx = np.array([i for tl in layers
-                        if abs(tl - src_layer) <= layer_window
-                        for i in by_layer[tl]])
+    tgt_idx = _window_targets(src_layer, layers, by_layer, layer_window)
     tgt_sig = sig[tgt_idx]
     sp_l, tp_l, sc_l, act_l = [], [], [], []
     for c0 in range(0, len(src_idx), chunk):
@@ -63,21 +94,45 @@ def _layer_edges(src_layer):
         #Top-k without negating the whole [chunk x targets] block (saves a large
         #copy per chunk): partition for the k largest, then keep that slice.
         part = np.argpartition(sims, sims.shape[1] - k, axis=1)[:, -k:]
-        sc = np.take_along_axis(sims, part, axis=1).ravel()
-        sp = np.repeat(cidx, k)
-        tp = tgt_idx[part].ravel()
-        if bits is not None:
-            inter = _POPCOUNT[bits[sp] & bits[tp]].sum(axis=1)
-            union = _POPCOUNT[bits[sp] | bits[tp]].sum(axis=1)
-            ov = np.where(union > 0, inter / np.maximum(union, 1), 0.0)
-        else:
-            ov = np.zeros(sp.shape[0])
-        keep = (sc >= min_score) & (sp != tp)
-        sp, tp, sc, ov = sp[keep], tp[keep], sc[keep], ov[keep]
-        sp_l.append(sp); tp_l.append(tp); sc_l.append(sc); act_l.append(0.5 * sc + 0.5 * ov)
-    cat = lambda parts, dt: np.concatenate(parts) if parts else np.empty(0, dt)
-    return (cat(sp_l, np.int64), cat(tp_l, np.int64),
-            cat(sc_l, np.float64), cat(act_l, np.float64))
+        sc = np.take_along_axis(sims, part, axis=1)
+        sp, tp, scf, act = _chunk_edges(cidx, part, sc, tgt_idx, bits, min_score)
+        sp_l.append(sp); tp_l.append(tp); sc_l.append(scf); act_l.append(act)
+    return (_cat(sp_l, np.int64), _cat(tp_l, np.int64),
+            _cat(sc_l, np.float64), _cat(act_l, np.float64))
+
+
+def _build_edges_gpu(sig, bits, by_layer, layers, layer_window, top_k,
+                     min_score, chunk, prog):
+    """GPU similarity + top-k: the heavy part (sig @ sig.T and the top-k) runs on
+    the GPU; overlap popcount and assembly stay on CPU. Falls back to raising so
+    the caller can use the CPU path if anything goes wrong."""
+    import torch
+
+    dev = torch.device("cuda")
+    sig_t = torch.from_numpy(np.ascontiguousarray(sig)).to(dev)
+    sp_l, tp_l, sc_l, act_l = [], [], [], []
+    for src_layer in layers:
+        src_idx = np.array(by_layer[src_layer])
+        if not len(src_idx):
+            continue
+        tgt_idx = _window_targets(src_layer, layers, by_layer, layer_window)
+        tgt_t = sig_t[torch.from_numpy(tgt_idx).to(dev)]
+        for c0 in range(0, len(src_idx), chunk):
+            cidx = src_idx[c0:c0 + chunk]
+            s = sig_t[torch.from_numpy(cidx).to(dev)]
+            sims = s @ tgt_t.T
+            k = min(top_k, sims.shape[1])
+            vals, idx = torch.topk(sims, k, dim=1)
+            part = idx.cpu().numpy()
+            sc = vals.cpu().numpy()
+            sp, tp, scf, act = _chunk_edges(cidx, part, sc, tgt_idx, bits, min_score)
+            sp_l.append(sp); tp_l.append(tp); sc_l.append(scf); act_l.append(act)
+            prog.tick(len(cidx), extra=f"L{src_layer}")
+        del tgt_t
+    del sig_t
+    torch.cuda.empty_cache()
+    return (_cat(sp_l, np.int64), _cat(tp_l, np.int64),
+            _cat(sc_l, np.float64), _cat(act_l, np.float64))
 
 
 @register("build-graphs", 8,
@@ -137,29 +192,51 @@ def run(library: Library, backend: ModelBackend, layer_window: int | None = None
     _SHARED.update(sig=sig, bits=bits, by_layer=by_layer, layers=layers,
                    layer_window=layer_window, top_k=config.edges_top_k,
                    min_score=min_score, chunk=chunk)
-    #Only fan out for real workloads; small/test runs stay serial (no fork cost).
-    workers = 1 if total_sources < 20000 else min(resolve_workers(), 8, len(layers))
     src_parts, tgt_parts, score_parts, act_parts = [], [], [], []
 
     def _collect(res, src_layer):
         sp_, tp_, sc_, act_ = res
         src_parts.append(sp_); tgt_parts.append(tp_)
         score_parts.append(sc_); act_parts.append(act_)
-        prog.tick(len(by_layer[src_layer]), extra=f"L{src_layer} done")
 
-    if workers <= 1:
-        for src_layer in layers:
-            _collect(_layer_edges(src_layer), src_layer)
-    else:
-        import multiprocessing as mp
-        from concurrent.futures import ProcessPoolExecutor
-        ctx = mp.get_context("fork")
-        print(f"[build-graphs] fanning {len(layers)} layers across {workers} processes", flush=True)
-        with ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as ex:
-            futs = {ex.submit(_layer_edges, l): l for l in layers}
-            from concurrent.futures import as_completed
-            for fut in as_completed(futs):
-                _collect(fut.result(), futs[fut])
+    #Prefer the GPU for the similarity/top-k (orders of magnitude faster); fall
+    #back to a CPU process pool across layers, then serial for tiny/test runs.
+    gpu_ok = False
+    if total_sources >= 20000 and not _env_disabled("ATLAS_NO_GPU"):
+        try:
+            import torch
+            gpu_ok = torch.cuda.is_available()
+        except Exception:  # noqa: BLE001 — torch optional
+            gpu_ok = False
+
+    if gpu_ok:
+        print("[build-graphs] using GPU for similarity/top-k", flush=True)
+        try:
+            res = _build_edges_gpu(sig, bits, by_layer, layers, layer_window,
+                                   config.edges_top_k, min_score, chunk, prog)
+            src_parts, tgt_parts, score_parts, act_parts = ([res[0]], [res[1]],
+                                                            [res[2]], [res[3]])
+        except Exception as e:  # noqa: BLE001 — degrade gracefully to CPU
+            print(f"[build-graphs] GPU path failed ({e}); falling back to CPU", flush=True)
+            gpu_ok = False
+            src_parts, tgt_parts, score_parts, act_parts = [], [], [], []
+
+    if not gpu_ok:
+        workers = 1 if total_sources < 20000 else min(resolve_workers(), 8, len(layers))
+        if workers <= 1:
+            for src_layer in layers:
+                _collect(_layer_edges(src_layer), src_layer)
+                prog.tick(len(by_layer[src_layer]), extra=f"L{src_layer} done")
+        else:
+            import multiprocessing as mp
+            from concurrent.futures import ProcessPoolExecutor, as_completed
+            ctx = mp.get_context("fork")
+            print(f"[build-graphs] fanning {len(layers)} layers across {workers} processes", flush=True)
+            with ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as ex:
+                futs = {ex.submit(_layer_edges, l): l for l in layers}
+                for fut in as_completed(futs):
+                    _collect(fut.result(), futs[fut])
+                    prog.tick(len(by_layer[futs[fut]]), extra=f"L{futs[fut]} done")
     prog.done()
 
     print("[build-graphs] assembling edge tables…", flush=True)
