@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+#Launch the Atlas Explorer (Streamlit) over a built library.
+#Usage:
+#   ./atlasdashboard                       # uses the default library location
+#   ./atlasdashboard /path/to/atlas_library
+#   ATLAS_LIBRARY_DIR=/path ./atlasdashboard
+
+DATA_ROOT="${ATLAS_DATA_ROOT:-$HOME/data/models}"
+LIBRARY_DIR="${1:-${ATLAS_LIBRARY_DIR:-$DATA_ROOT/atlas_library}}"
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+cd "$SCRIPT_DIR"
+
+if ! python3 -c "import streamlit" 2>/dev/null; then
+  echo "Streamlit is not installed. Install it with:"
+  echo "    pip install streamlit"
+  exit 1
+fi
+
+exec streamlit run atlas/dashboard.py -- --library "$LIBRARY_DIR"

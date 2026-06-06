@@ -105,6 +105,21 @@ duckdb /home/sfo/data/models/atlas_library/indexes/atlas.duckdb
 > SELECT * FROM cluster_stats WHERE source_score > 0.7 ORDER BY mean_write_norm DESC;
 ```
 
+### Interactive explorer
+
+A Streamlit dashboard browses the library without writing SQL — overview, clusters
+(with members and signal flow), units (top firing tokens, similar units, weight
+slices), the connection graph, and a free-form SQL console:
+
+```
+pip install streamlit
+./atlasdashboard                       # default library location
+./atlasdashboard /path/to/atlas_library
+```
+
+It reads only the committed artifacts (DuckDB views + `AtlasQuery`); it never loads
+the model.
+
 ## Scope
 
 * **V1 (implemented):** decoder-only support, tensor + unit catalogs, MLP neuron
