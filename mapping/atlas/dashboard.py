@@ -473,6 +473,9 @@ def page_plotlab(lib: str, tables: set[str]):
     options = list(datasets) + [f"raw: {t}" for t in sorted(tables)]
     choice = st.selectbox("Dataset", options)
     base_sql = datasets[choice] if choice in datasets else f"SELECT * FROM {choice[5:]}"
+    st.caption("Tip: to histogram per-unit values (e.g. weights) within clusters, "
+               "pick **units — …** (one row per unit). The **clusters** dataset has "
+               "only one row per cluster, so it can't form a distribution.")
 
     schema = _schema(lib, base_sql)
     if not schema:
@@ -554,106 +557,115 @@ def page_plotlab(lib: str, tables: set[str]):
 
 
 def _histogram(df, numeric_cols, all_cols, none):
-    """Overlaid per-group histograms with bin/opacity/log/KDE controls."""
+    """Overlaid per-group histograms (X = value binned, Y = count/density)."""
+    if not numeric_cols:
+        st.warning("This dataset has no numeric columns to bin. For weight "
+                   "distributions, pick the **units — …** dataset and an X such as "
+                   "`write_norm` or `read_norm`.")
+        return
+
     c1, c2 = st.columns(2)
-    x = c1.selectbox("Value (X)", numeric_cols or all_cols)
-    group = c2.selectbox("Group / color (overlay one distribution per value)",
-                         [none] + all_cols)
+    x = c1.selectbox("Value to bin (X axis)", numeric_cols)
+    group = c2.selectbox("Separate histogram per … (color)", [none] + all_cols)
 
     o1, o2, o3, o4 = st.columns(4)
     nbins = o1.slider("Bins", 5, 250, 40)
-    binwidth = o2.number_input("Bin width (0 = auto)", min_value=0.0, value=0.0)
-    opacity = o3.slider("Opacity", 0.1, 1.0, 0.5, 0.05)
-    norm = o4.radio("Y axis", ["count", "density"], horizontal=True)
-
-    k1, k2, k3 = st.columns(3)
-    show_kde = k1.checkbox("Overlay KDE", value=False)
-    bw = k2.slider("KDE smoothing", 0.2, 3.0, 1.0, 0.1)
-    log_y = k3.checkbox("Log Y", value=False)
+    binwidth = o2.number_input("Exact bin width (0 = auto)", min_value=0.0, value=0.0)
+    opacity = o3.slider("Opacity", 0.1, 1.0, 0.55, 0.05)
+    log_y = o4.checkbox("Log Y", value=False)
+    norm = st.radio("Y axis", ["count", "density (normalized per group)"],
+                    horizontal=True)
+    show_kde = st.checkbox("Overlay smooth KDE curve", value=False)
 
     keep = [x] + ([group] if group != none else [])
     data = df[keep].copy()
     data[x] = pd.to_numeric(data[x], errors="coerce")
     data = data.replace([np.inf, -np.inf], np.nan).dropna(subset=[x])
     if data.empty:
-        st.warning("No numeric data in the selected column.")
+        st.warning("No numeric values in the selected column (all null/inf).")
         return
 
-    #Pick which groups to overlay (default the most populous, to stay legible).
+    #Guard the common confusion: a one-row-per-group dataset can't form a
+    #distribution. Steer the user to the units dataset.
     if group != none:
-        counts = data[group].astype(str).value_counts()
-        opts = counts.index.tolist()
-        chosen = st.multiselect(
-            f"Distributions to overlay ({len(opts)} available)", opts,
-            default=opts[: min(6, len(opts))])
-        data = data[data[group].astype(str).isin(chosen)]
-        if data.empty:
-            st.warning("Select at least one group to plot.")
+        data[group] = data[group].astype(str)
+        per_group = data.groupby(group)[x].size()
+        if per_group.max() <= 1:
+            st.warning("Each selected group has only one value, so there's no "
+                       "distribution to histogram. This usually means you're on a "
+                       "summary dataset (one row per cluster). Switch the **Dataset** "
+                       "to **units — …** to histogram per-unit values within clusters.")
             return
-        groups = [(g, data.loc[data[group].astype(str) == g, x].to_numpy())
-                  for g in chosen]
-    else:
-        groups = [("all", data[x].to_numpy())]
+        opts = data[group].value_counts().index.tolist()
+        chosen = st.multiselect(
+            f"Which {group} values to overlay ({len(opts)} available)",
+            opts, default=opts[: min(6, len(opts))])
+        if not chosen:
+            st.info("Pick at least one group to plot.")
+            return
+        data = data[data[group].isin(chosen)]
 
-    #Shared bin edges across groups so overlays line up.
-    lo, hi = float(data[x].min()), float(data[x].max())
-    if hi <= lo:
-        hi = lo + 1.0
-    if binwidth and binwidth > 0:
-        if (hi - lo) / binwidth > 2000:
-            st.warning("Bin width too small for this range; using auto bins.")
-            edges = np.linspace(lo, hi, nbins + 1)
-        else:
-            edges = np.arange(lo, hi + binwidth, binwidth)
-    else:
-        edges = np.linspace(lo, hi, nbins + 1)
-    if len(edges) < 2:
-        edges = np.array([lo, hi])
-    width = float(edges[1] - edges[0])
-
-    rows, kde_rows = [], []
-    grid = np.linspace(lo, hi, 256)
-    for gname, vals in groups:
-        vals = vals[np.isfinite(vals)]
-        if vals.size == 0:
-            continue
-        cnt, _ = np.histogram(vals, bins=edges, density=(norm == "density"))
-        for v, l, r in zip(cnt, edges[:-1], edges[1:]):
-            rows.append({"group": str(gname), "x0": float(l), "x1": float(r),
-                         "value": float(v)})
-        if show_kde:
-            dens = _kde(vals, grid, bw)
-            if dens is not None:
-                scale = 1.0 if norm == "density" else vals.size * width
-                for gx, gy in zip(grid, dens * scale):
-                    kde_rows.append({"group": str(gname), "x": float(gx),
-                                     "value": float(gy)})
-
-    hist_df = pd.DataFrame(rows)
-    if hist_df.empty:
-        st.warning("Nothing to plot.")
-        return
-    if log_y:
-        hist_df = hist_df[hist_df["value"] > 0]
+    #Altair-native binning — robust, well-tested rendering.
+    bin_opts = alt.Bin(step=binwidth) if binwidth and binwidth > 0 \
+        else alt.Bin(maxbins=int(nbins))
     yscale = alt.Scale(type="log") if log_y else alt.Scale()
-    ytitle = "density" if norm == "density" else "count"
-    color_enc = alt.Color("group:N", title=(group if group != none else None))
+    color_enc = (alt.Color(f"{group}:N", title=group) if group != none
+                 else alt.value("#4C78A8"))
 
-    bars = (alt.Chart(hist_df).mark_bar(opacity=opacity)
-            .encode(x=alt.X("x0:Q", title=x, scale=alt.Scale(zero=False)),
-                    x2="x1:Q",
-                    y=alt.Y("value:Q", title=ytitle, stack=None, scale=yscale),
-                    color=color_enc,
-                    tooltip=["group", "x0", "x1", "value"]))
+    if norm.startswith("count"):
+        y = alt.Y("count():Q", stack=None, scale=yscale, title="count")
+    else:
+        #Fraction within each group: count() / group total.
+        y = alt.Y("__frac:Q", stack=None, scale=yscale, title="density (per group)")
+
+    base = alt.Chart(data)
+    if not norm.startswith("count"):
+        grp_field = group if group != none else None
+        base = base.transform_bin("__bin", field=x, bin=bin_opts)
+        gb = ["__bin"] + ([grp_field] if grp_field else [])
+        base = (base.transform_aggregate(__c="count()", groupby=gb)
+                .transform_joinaggregate(__t="sum(__c)",
+                                         groupby=([grp_field] if grp_field else []))
+                .transform_calculate(__frac="datum.__c / datum.__t"))
+        bars = base.mark_bar(opacity=opacity).encode(
+            x=alt.X("__bin:Q", title=x), x2="__bin_end:Q", y=y, color=color_enc,
+            tooltip=["__bin:Q", alt.Tooltip("__frac:Q", format=".3f")])
+    else:
+        tt = [alt.Tooltip(f"{x}:Q", bin=bin_opts, title=x), alt.Tooltip("count():Q")]
+        if group != none:
+            tt.append(alt.Tooltip(f"{group}:N"))
+        bars = base.mark_bar(opacity=opacity).encode(
+            x=alt.X(f"{x}:Q", bin=bin_opts, title=x), y=y, color=color_enc, tooltip=tt)
+
     layers = [bars]
-    if show_kde and kde_rows:
-        kdf = pd.DataFrame(kde_rows)
-        if log_y:
-            kdf = kdf[kdf["value"] > 0]
-        layers.append(alt.Chart(kdf).mark_line(strokeWidth=2)
-                      .encode(x="x:Q", y=alt.Y("value:Q", scale=yscale), color=color_enc))
-    st.altair_chart(alt.layer(*layers).properties(height=470).interactive(),
-                    use_container_width=True)
+
+    #Optional KDE overlay (numpy), scaled to match the count axis.
+    if show_kde:
+        lo, hi = float(data[x].min()), float(data[x].max())
+        if hi <= lo:
+            hi = lo + 1.0
+        width = binwidth if (binwidth and binwidth > 0) else (hi - lo) / max(nbins, 1)
+        grid = np.linspace(lo, hi, 256)
+        krows = []
+        giter = (data.groupby(group) if group != none else [("all", data)])
+        for gname, gdf in giter:
+            vals = gdf[x].to_numpy()
+            dens = _kde(vals, grid, 1.0)
+            if dens is None:
+                continue
+            scale = 1.0 if not norm.startswith("count") else vals.size * width
+            for gx, gy in zip(grid, dens * scale):
+                krows.append({"x": float(gx), "value": float(gy), "group": str(gname)})
+        if krows:
+            kdf = pd.DataFrame(krows)
+            if log_y:
+                kdf = kdf[kdf["value"] > 0]
+            kcolor = alt.Color("group:N") if group != none else alt.value("#E45756")
+            layers.append(alt.Chart(kdf).mark_line(strokeWidth=2).encode(
+                x="x:Q", y=alt.Y("value:Q", scale=yscale), color=kcolor))
+
+    st.altair_chart(alt.layer(*layers).resolve_scale(color="shared")
+                    .properties(height=470).interactive(), use_container_width=True)
 
 
 def _kde(values, grid, bw_mult):
