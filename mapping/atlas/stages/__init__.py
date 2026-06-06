@@ -46,7 +46,7 @@ def load_all() -> None:
         stage06_capture_activations, stage07_probes, stage08_build_graphs,
         stage09_cluster, stage10_score_clusters, stage11_interventions,
         stage12_export_summaries, stage_quality, stage_dashboard_summaries,
-        stage13_build_indexes,
+        stage_cluster_views, stage13_build_indexes,
     )
 
 

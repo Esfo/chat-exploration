@@ -137,6 +137,9 @@ class ExtractionConfig:
     #and a fraction of the smaller cluster.
     xlayer_min_links: int = 3
     xlayer_link_fraction: float = 0.1
+    #Cluster 2D embedding: PCA by default; set True to never try UMAP even if
+    #installed (UMAP is used automatically when available).
+    embedding_disable_umap: bool = False
 
     #--- unit selection ---
     include_mlp_neurons: bool = True
@@ -242,6 +245,11 @@ LAYOUT = {
         "summaries/cluster_quality.parquet",
         "summaries/layer_flow_matrix.parquet",
         "summaries/evidence_profiles.parquet",
+        "summaries/cluster_embedding_2d.parquet",
+        "summaries/cluster_nearest_neighbors.parquet",
+        "summaries/cluster_member_view.parquet",
+        "summaries/cluster_edge_neighborhoods.parquet",
+        "summaries/cluster_metric_baselines.parquet",
     ],
     "indexes": [
         "indexes/atlas.duckdb",
