@@ -17,6 +17,7 @@ import os
 import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -502,33 +503,9 @@ def page_plotlab(lib: str, tables: set[str]):
     #--- chart spec -----------------------------------------------------
     chart_type = st.selectbox(
         "Chart type", ["Histogram", "Scatter", "Bar", "Line", "Box", "Heatmap", "Table"])
-    limit = st.slider("Max rows to load", 1000, 100000, 20000, step=1000)
+    limit = st.slider("Max rows to load", 1000, 200000, 20000, step=1000)
 
-    enc: dict[str, str] = {}
-    c1, c2, c3, c4 = st.columns(4)
-    if chart_type == "Histogram":
-        enc["x"] = c1.selectbox("Value (X)", numeric or cols)
-        enc["color"] = c2.selectbox("Group / color", [none] + cols)
-    elif chart_type == "Scatter":
-        enc["x"] = c1.selectbox("X", numeric or cols)
-        enc["y"] = c2.selectbox("Y", numeric or cols)
-        enc["color"] = c3.selectbox("Color", [none] + cols)
-        enc["size"] = c4.selectbox("Size", [none] + numeric)
-    elif chart_type in ("Bar", "Line"):
-        enc["x"] = c1.selectbox("X (category/axis)", cols)
-        enc["agg"] = c2.selectbox("Aggregate", ["count", "mean", "median", "sum", "min", "max"])
-        enc["y"] = c3.selectbox("Y (value)", [none] + numeric)
-        enc["color"] = c4.selectbox("Color", [none] + cols)
-    elif chart_type == "Box":
-        enc["x"] = c1.selectbox("Category (X)", cols)
-        enc["y"] = c2.selectbox("Value (Y)", numeric or cols)
-    elif chart_type == "Heatmap":
-        enc["x"] = c1.selectbox("X", cols)
-        enc["y"] = c2.selectbox("Y", cols)
-        enc["agg"] = c3.selectbox("Color = aggregate", ["count", "mean", "sum", "max"])
-        enc["cval"] = c4.selectbox("of (value)", [none] + numeric)
-
-    #--- fetch & render -------------------------------------------------
+    #--- fetch ----------------------------------------------------------
     sql = f"SELECT * FROM ({base_sql}) _t{where_sql} LIMIT {int(limit)}"
     with st.expander("Generated SQL"):
         st.code(sql, language="sql")
@@ -537,14 +514,163 @@ def page_plotlab(lib: str, tables: set[str]):
     if df.empty:
         return
 
+    #Classify from the actual frame (more reliable than the schema probe).
+    numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+    all_cols = list(df.columns)
+
+    #--- render ---------------------------------------------------------
     if chart_type == "Table" or not _HAS_ALT:
         st.dataframe(df, use_container_width=True, height=500)
+    elif chart_type == "Histogram":
+        _histogram(df, numeric_cols, all_cols, none)
     else:
+        enc: dict[str, str] = {}
+        c1, c2, c3, c4 = st.columns(4)
+        if chart_type == "Scatter":
+            enc["x"] = c1.selectbox("X", numeric_cols or all_cols)
+            enc["y"] = c2.selectbox("Y", numeric_cols or all_cols)
+            enc["color"] = c3.selectbox("Color", [none] + all_cols)
+            enc["size"] = c4.selectbox("Size", [none] + numeric_cols)
+        elif chart_type in ("Bar", "Line"):
+            enc["x"] = c1.selectbox("X (category/axis)", all_cols)
+            enc["agg"] = c2.selectbox("Aggregate",
+                                      ["count", "mean", "median", "sum", "min", "max"])
+            enc["y"] = c3.selectbox("Y (value)", [none] + numeric_cols)
+            enc["color"] = c4.selectbox("Color", [none] + all_cols)
+        elif chart_type == "Box":
+            enc["x"] = c1.selectbox("Category (X)", all_cols)
+            enc["y"] = c2.selectbox("Value (Y)", numeric_cols or all_cols)
+        elif chart_type == "Heatmap":
+            enc["x"] = c1.selectbox("X", all_cols)
+            enc["y"] = c2.selectbox("Y", all_cols)
+            enc["agg"] = c3.selectbox("Color = aggregate", ["count", "mean", "sum", "max"])
+            enc["cval"] = c4.selectbox("of (value)", [none] + numeric_cols)
         chart = _build_chart(df, chart_type, enc, none)
         if chart is not None:
             st.altair_chart(chart, use_container_width=True)
+
     st.download_button("Download CSV", df.to_csv(index=False), "atlas_plotlab.csv",
                        "text/csv")
+
+
+def _histogram(df, numeric_cols, all_cols, none):
+    """Overlaid per-group histograms with bin/opacity/log/KDE controls."""
+    c1, c2 = st.columns(2)
+    x = c1.selectbox("Value (X)", numeric_cols or all_cols)
+    group = c2.selectbox("Group / color (overlay one distribution per value)",
+                         [none] + all_cols)
+
+    o1, o2, o3, o4 = st.columns(4)
+    nbins = o1.slider("Bins", 5, 250, 40)
+    binwidth = o2.number_input("Bin width (0 = auto)", min_value=0.0, value=0.0)
+    opacity = o3.slider("Opacity", 0.1, 1.0, 0.5, 0.05)
+    norm = o4.radio("Y axis", ["count", "density"], horizontal=True)
+
+    k1, k2, k3 = st.columns(3)
+    show_kde = k1.checkbox("Overlay KDE", value=False)
+    bw = k2.slider("KDE smoothing", 0.2, 3.0, 1.0, 0.1)
+    log_y = k3.checkbox("Log Y", value=False)
+
+    keep = [x] + ([group] if group != none else [])
+    data = df[keep].copy()
+    data[x] = pd.to_numeric(data[x], errors="coerce")
+    data = data.replace([np.inf, -np.inf], np.nan).dropna(subset=[x])
+    if data.empty:
+        st.warning("No numeric data in the selected column.")
+        return
+
+    #Pick which groups to overlay (default the most populous, to stay legible).
+    if group != none:
+        counts = data[group].astype(str).value_counts()
+        opts = counts.index.tolist()
+        chosen = st.multiselect(
+            f"Distributions to overlay ({len(opts)} available)", opts,
+            default=opts[: min(6, len(opts))])
+        data = data[data[group].astype(str).isin(chosen)]
+        if data.empty:
+            st.warning("Select at least one group to plot.")
+            return
+        groups = [(g, data.loc[data[group].astype(str) == g, x].to_numpy())
+                  for g in chosen]
+    else:
+        groups = [("all", data[x].to_numpy())]
+
+    #Shared bin edges across groups so overlays line up.
+    lo, hi = float(data[x].min()), float(data[x].max())
+    if hi <= lo:
+        hi = lo + 1.0
+    if binwidth and binwidth > 0:
+        if (hi - lo) / binwidth > 2000:
+            st.warning("Bin width too small for this range; using auto bins.")
+            edges = np.linspace(lo, hi, nbins + 1)
+        else:
+            edges = np.arange(lo, hi + binwidth, binwidth)
+    else:
+        edges = np.linspace(lo, hi, nbins + 1)
+    if len(edges) < 2:
+        edges = np.array([lo, hi])
+    width = float(edges[1] - edges[0])
+
+    rows, kde_rows = [], []
+    grid = np.linspace(lo, hi, 256)
+    for gname, vals in groups:
+        vals = vals[np.isfinite(vals)]
+        if vals.size == 0:
+            continue
+        cnt, _ = np.histogram(vals, bins=edges, density=(norm == "density"))
+        for v, l, r in zip(cnt, edges[:-1], edges[1:]):
+            rows.append({"group": str(gname), "x0": float(l), "x1": float(r),
+                         "value": float(v)})
+        if show_kde:
+            dens = _kde(vals, grid, bw)
+            if dens is not None:
+                scale = 1.0 if norm == "density" else vals.size * width
+                for gx, gy in zip(grid, dens * scale):
+                    kde_rows.append({"group": str(gname), "x": float(gx),
+                                     "value": float(gy)})
+
+    hist_df = pd.DataFrame(rows)
+    if hist_df.empty:
+        st.warning("Nothing to plot.")
+        return
+    if log_y:
+        hist_df = hist_df[hist_df["value"] > 0]
+    yscale = alt.Scale(type="log") if log_y else alt.Scale()
+    ytitle = "density" if norm == "density" else "count"
+    color_enc = alt.Color("group:N", title=(group if group != none else None))
+
+    bars = (alt.Chart(hist_df).mark_bar(opacity=opacity)
+            .encode(x=alt.X("x0:Q", title=x, scale=alt.Scale(zero=False)),
+                    x2="x1:Q",
+                    y=alt.Y("value:Q", title=ytitle, stack=None, scale=yscale),
+                    color=color_enc,
+                    tooltip=["group", "x0", "x1", "value"]))
+    layers = [bars]
+    if show_kde and kde_rows:
+        kdf = pd.DataFrame(kde_rows)
+        if log_y:
+            kdf = kdf[kdf["value"] > 0]
+        layers.append(alt.Chart(kdf).mark_line(strokeWidth=2)
+                      .encode(x="x:Q", y=alt.Y("value:Q", scale=yscale), color=color_enc))
+    st.altair_chart(alt.layer(*layers).properties(height=470).interactive(),
+                    use_container_width=True)
+
+
+def _kde(values, grid, bw_mult):
+    """Gaussian KDE on a grid (Silverman bandwidth × bw_mult), no scipy needed."""
+    values = np.asarray(values, dtype=float)
+    values = values[np.isfinite(values)]
+    n = values.size
+    if n < 2:
+        return None
+    std = values.std(ddof=1)
+    if std == 0:
+        return None
+    h = bw_mult * 1.06 * std * n ** (-1 / 5)
+    if h <= 0:
+        return None
+    u = (grid[:, None] - values[None, :]) / h
+    return np.exp(-0.5 * u * u).sum(axis=1) / (n * h * np.sqrt(2 * np.pi))
 
 
 def _build_chart(df, chart_type, enc, none):
