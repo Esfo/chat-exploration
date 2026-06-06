@@ -85,7 +85,7 @@ def _hist(df: pd.DataFrame, col: str, title: str, bins: int = 40):
                  .encode(alt.X(f"{col}:Q", bin=alt.Bin(maxbins=bins), title=title),
                          alt.Y("count()", title="count"))
                  .properties(height=240))
-        st.altair_chart(chart, use_container_width=True)
+        st.altair_chart(chart, width="stretch")
     else:
         st.bar_chart(df[col])
 
@@ -169,7 +169,7 @@ def page_overview(lib: str, tables: set[str]):
         with st.expander("Run log (latest 25)"):
             try:
                 logdf = pd.read_json(log_path, lines=True)
-                st.dataframe(logdf.tail(25).iloc[::-1], use_container_width=True)
+                st.dataframe(logdf.tail(25).iloc[::-1], width="stretch")
             except Exception as e:  # noqa: BLE001
                 st.caption(f"Could not read run log: {e}")
 
@@ -216,10 +216,10 @@ def page_clusters(lib: str, tables: set[str]):
                            tooltip=["cluster_id", "dominant_unit_type", "member_count",
                                     "source_score", "sink_score", "relay_score"])
                    .interactive().properties(height=360))
-        st.altair_chart(scatter, use_container_width=True)
+        st.altair_chart(scatter, width="stretch")
 
     st.caption(f"{len(df)} clusters (top 500 by size)")
-    st.dataframe(df, use_container_width=True, height=300)
+    st.dataframe(df, width="stretch", height=300)
 
     if df.empty:
         return
@@ -245,17 +245,17 @@ def page_clusters(lib: str, tables: set[str]):
         st.subheader("Members")
         members = q_obj.units_in_cluster(cid)
         st.caption(f"{len(members)} units")
-        st.dataframe(pd.DataFrame({"unit_id": members}), use_container_width=True, height=260)
+        st.dataframe(pd.DataFrame({"unit_id": members}), width="stretch", height=260)
     with right:
         st.subheader("Signal flow")
         up = q_obj.upstream_clusters(cid)
         down = q_obj.downstream_clusters(cid)
         st.write("**Upstream (feeds in):**")
         st.dataframe(pd.DataFrame(up, columns=["cluster_id", "score"]).head(15),
-                     use_container_width=True)
+                     width="stretch")
         st.write("**Downstream (feeds out):**")
         st.dataframe(pd.DataFrame(down, columns=["cluster_id", "score"]).head(15),
-                     use_container_width=True)
+                     width="stretch")
 
 
 def page_units(lib: str, tables: set[str]):
@@ -296,7 +296,7 @@ def page_units(lib: str, tables: set[str]):
     if sort_by in df.columns:
         st.subheader(f"Distribution of {sort_by} (shown units)")
         _hist(df, sort_by, sort_by)
-    st.dataframe(df, use_container_width=True, height=300)
+    st.dataframe(df, width="stretch", height=300)
 
     if df.empty:
         return
@@ -335,7 +335,7 @@ def _unit_detail(lib: str, tables: set[str], uid: str):
                              .encode(x=alt.X("activation:Q", title="activation value"),
                                      y=alt.Y("count:Q"))
                              .properties(height=220))
-                    st.altair_chart(chart, use_container_width=True)
+                    st.altair_chart(chart, width="stretch")
                 else:
                     st.bar_chart(hist_df.set_index("activation"))
             except Exception as e:  # noqa: BLE001
@@ -348,12 +348,12 @@ def _unit_detail(lib: str, tables: set[str], uid: str):
             ev = _sql(lib, "SELECT event_rank, token_text, activation_value, "
                            "sequence_id, token_position FROM activation_top_events "
                            "WHERE unit_id = ? ORDER BY event_rank", [uid])
-            st.dataframe(ev, use_container_width=True, height=260)
+            st.dataframe(ev, width="stretch", height=260)
     with right:
         st.write("**Similar units (by firing signature)**")
         sim = q_obj.similar_units(uid, k=15)
         st.dataframe(pd.DataFrame(sim, columns=["unit_id", "similarity"]),
-                     use_container_width=True, height=260)
+                     width="stretch", height=260)
 
     with st.expander("Connections (combined edge graph)"):
         if "unit_edges_combined" in tables:
@@ -362,11 +362,11 @@ def _unit_detail(lib: str, tables: set[str], uid: str):
                          "edge_confidence FROM unit_edges_combined "
                          "WHERE source_unit_id = ? OR target_unit_id = ? "
                          "ORDER BY combined_score DESC LIMIT 50", [uid, uid])
-            st.dataframe(edges, use_container_width=True)
+            st.dataframe(edges, width="stretch")
 
     with st.expander("Checkpoint tensor slices (where this unit lives in the weights)"):
         st.dataframe(pd.DataFrame(q_obj.tensor_slices_for_unit(uid)),
-                     use_container_width=True)
+                     width="stretch")
 
 
 def page_graph(lib: str, tables: set[str]):
@@ -388,9 +388,9 @@ def page_graph(lib: str, tables: set[str]):
                                             scale=alt.Scale(scheme="magma")),
                             tooltip=["source_layer", "target_layer", "edges", "score"])
                     .properties(height=420))
-            st.altair_chart(heat, use_container_width=True)
+            st.altair_chart(heat, width="stretch")
         else:
-            st.dataframe(flow, use_container_width=True)
+            st.dataframe(flow, width="stretch")
 
     st.subheader("Top edges")
     min_conf = st.slider("Minimum edge confidence", 0.0, 1.0, 0.0, 0.05)
@@ -399,12 +399,12 @@ def page_graph(lib: str, tables: set[str]):
                    "WHERE edge_confidence >= ? ORDER BY combined_score DESC LIMIT 500",
               [min_conf])
     st.caption(f"Top {len(df)} edges by combined score (confidence ≥ {min_conf})")
-    st.dataframe(df, use_container_width=True, height=420)
+    st.dataframe(df, width="stretch", height=420)
     if "cluster_edges" in tables:
         with st.expander("Cluster-level edges"):
             st.dataframe(_sql(lib, "SELECT * FROM cluster_edges "
                                    "ORDER BY sum_combined_score DESC LIMIT 200"),
-                         use_container_width=True)
+                         width="stretch")
 
 
 #----------------------------------------------------------------------
@@ -529,7 +529,7 @@ def page_plotlab(lib: str, tables: set[str]):
 
     #--- render ---------------------------------------------------------
     if chart_type == "Table" or not _HAS_ALT:
-        st.dataframe(df, use_container_width=True, height=500)
+        st.dataframe(df, width="stretch", height=500)
     else:
         enc: dict[str, str] = {}
         c1, c2, c3, c4 = st.columns(4)
@@ -554,7 +554,7 @@ def page_plotlab(lib: str, tables: set[str]):
             enc["cval"] = c4.selectbox("of (value)", [none] + numeric_cols)
         chart = _build_chart(df, chart_type, enc, none)
         if chart is not None:
-            st.altair_chart(chart, use_container_width=True)
+            st.altair_chart(chart, width="stretch")
 
     st.download_button("Download CSV", df.to_csv(index=False), "atlas_plotlab.csv",
                        "text/csv")
@@ -712,7 +712,7 @@ def _histogram(lib, base_sql, where_sql, schema, none):
                 x="x:Q", y=alt.Y("value:Q", scale=yscale), color=kcolor))
 
     st.altair_chart(alt.layer(*layers).resolve_scale(color="shared")
-                    .properties(height=480).interactive(), use_container_width=True)
+                    .properties(height=480).interactive(), width="stretch")
     st.download_button("Download CSV", data.to_csv(index=False),
                        "atlas_histogram.csv", "text/csv")
 
@@ -799,7 +799,7 @@ def page_sql(lib: str, tables: set[str]):
     if st.button("Run", type="primary"):
         df = _sql(lib, query)
         st.caption(f"{len(df)} rows")
-        st.dataframe(df, use_container_width=True, height=500)
+        st.dataframe(df, width="stretch", height=500)
         if not df.empty:
             st.download_button("Download CSV", df.to_csv(index=False),
                                "atlas_query.csv", "text/csv")
