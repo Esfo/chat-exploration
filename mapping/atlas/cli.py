@@ -130,25 +130,77 @@ def _run_all(args) -> None:
             return False
         return set(schema.names) <= have
 
+    #Code fingerprint per stage: hash the stage's own source plus any helper
+    #modules whose logic it depends on, and the schemas it writes. When the
+    #fingerprint changes, the stage's *logic* changed (even if its output schema
+    #did not — e.g. the exact-bitset capture change), so it reruns automatically.
+    #This is what removes the need for --from after a code change.
+    import hashlib
+    import inspect
+    from pathlib import Path
+    from . import schemas as _schemas
+    atlas_dir = Path(__file__).resolve().parent
+    extra_deps = {
+        "capture-activations": ["capture_accum.py", "sketches.py"],
+        "build-graphs": ["sketches.py"],
+        "static-analysis": ["sketches.py"],
+    }
+
+    def _fingerprint(stage):
+        h = hashlib.sha256()
+        files = [Path(inspect.getsourcefile(stage.run))]
+        files += [atlas_dir / d for d in extra_deps.get(stage.name, [])]
+        for f in files:
+            try:
+                h.update(f.read_bytes())
+            except OSError:
+                pass
+        for rel in stage.produces or []:
+            s = _schemas.SCHEMA_REGISTRY.get(rel)
+            if s is not None:
+                h.update(str(s).encode())
+        return h.hexdigest()
+
+    fp_path = library.path("stage_fingerprints.json")
+    try:
+        import json
+        stored_fp = json.loads(fp_path.read_text())
+    except Exception:  # noqa: BLE001 — first run / unreadable
+        stored_fp = {}
+    current_fp = {}
+
     cascade = False  # once a stage reruns, everything downstream must too
     for i, stage in enumerate(v1):
-        #Resume by default. Rerun a stage only when its outputs are missing or
-        #their schema is out of date (written by older code), or an earlier stage
-        #already reran this pass. No timestamp guessing — expensive, valid stages
-        #are never redone by surprise. --force / --from override.
+        #Resume by default. Rerun a stage when its outputs are missing, their
+        #schema is out of date, its code fingerprint changed, or an earlier stage
+        #already reran this pass. No timestamps, no flags needed for code changes.
+        fp = _fingerprint(stage)
+        current_fp[stage.name] = fp
         exists = stage.produces and all(library.path(p).exists() for p in stage.produces)
         schema_ok = exists and all(_schema_ok(p) for p in stage.produces)
+        #Unknown stored fingerprint (first run after this feature) is treated as
+        #current, so an already-complete library isn't needlessly rebuilt.
+        code_changed = stage.name in stored_fp and stored_fp[stage.name] != fp
         forced = getattr(args, "force", False) or i >= force_from_idx
-        if exists and schema_ok and not forced and not cascade:
+        if exists and schema_ok and not code_changed and not forced and not cascade:
             print(f"=== skipping {stage.name} (up to date) ===", flush=True)
             continue
         reason = ("forced" if forced else "upstream reran" if cascade
-                  else "missing outputs" if not exists else "schema out of date")
+                  else "missing outputs" if not exists
+                  else "schema out of date" if not schema_ok else "code changed")
         print(f"=== running {stage.name} ({reason}) ===", flush=True)
         t0 = time.time()
         _run_stage(stage.name, args)
         print(f"=== {stage.name} done in {(time.time()-t0)/60:.1f}m ===", flush=True)
         cascade = True
+        #Persist fingerprints as we go so an interrupted run resumes correctly.
+        import json
+        stored_fp[stage.name] = fp
+        fp_path.write_text(json.dumps({**stored_fp, **current_fp}, indent=2))
+
+    #Stamp fingerprints for any stages that were up to date (migration / no-op).
+    import json
+    fp_path.write_text(json.dumps({**stored_fp, **current_fp}, indent=2))
 
 
 def build_parser() -> argparse.ArgumentParser:
