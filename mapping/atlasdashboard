@@ -6,6 +6,10 @@ set -euo pipefail
 #   ./atlasdashboard                       # uses the default library location
 #   ./atlasdashboard /path/to/atlas_library
 #   ATLAS_LIBRARY_DIR=/path ./atlasdashboard
+#
+#Streamlit may live as a standalone `streamlit` binary (e.g. Arch's
+#python-streamlit) or only as a module under some Python. Try, in order: the
+#`streamlit` executable, then `python3 -m streamlit`, then `python -m streamlit`.
 
 DATA_ROOT="${ATLAS_DATA_ROOT:-$HOME/data/models}"
 LIBRARY_DIR="${1:-${ATLAS_LIBRARY_DIR:-$DATA_ROOT/atlas_library}}"
@@ -13,10 +17,37 @@ LIBRARY_DIR="${1:-${ATLAS_LIBRARY_DIR:-$DATA_ROOT/atlas_library}}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 cd "$SCRIPT_DIR"
 
-if ! python3 -c "import streamlit" 2>/dev/null; then
-  echo "Streamlit is not installed. Install it with:"
-  echo "    pip install streamlit"
-  exit 1
+run() { exec "$@" run atlas/dashboard.py -- --library "$LIBRARY_DIR"; }
+
+#The dashboard needs streamlit AND the atlas deps (duckdb/pyarrow/zarr) in the
+#SAME interpreter. Prefer the Python that can import the atlas stack; only use a
+#standalone `streamlit` binary if it can also import those deps.
+has() { "$@" -c "import streamlit, duckdb, pyarrow" >/dev/null 2>&1; }
+
+if has python3; then
+  run python3 -m streamlit
+elif command -v python >/dev/null 2>&1 && has python; then
+  run python -m streamlit
 fi
 
-exec streamlit run atlas/dashboard.py -- --library "$LIBRARY_DIR"
+echo "Streamlit + the atlas deps are not both importable from one interpreter."
+echo
+echo "You have streamlit (via pacman) in one Python and the atlas deps"
+echo "(duckdb/pyarrow/zarr) in another. Install streamlit into the SAME Python"
+echo "you ran the pipeline with:"
+echo
+echo "    python3 -m pip install streamlit"
+echo
+echo "(use the exact 'python3' below — the one with the atlas deps), then re-run."
+echo
+echo "Diagnostics:"
+echo "  python3 -> $(command -v python3 || echo n/a)"
+for mod in streamlit duckdb pyarrow zarr; do
+  if python3 -c "import $mod" >/dev/null 2>&1; then
+    echo "  python3 import $mod: OK"
+  else
+    echo "  python3 import $mod: MISSING"
+  fi
+done
+echo "  streamlit binary -> $(command -v streamlit || echo n/a)"
+exit 1
