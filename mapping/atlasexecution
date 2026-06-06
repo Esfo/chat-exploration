@@ -47,6 +47,13 @@ DEVICE="${DEVICE:-auto}"
 #Reduce CUDA fragmentation for tight-fitting activations.
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
+#The model is already local, so keep the HuggingFace loader fully offline — no
+#hub metadata checks or shard re-downloads (which show up as outbound network).
+#Set HF_HUB_OFFLINE=0 before running if you ever need to fetch a model.
+export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
+export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-1}"
+export HF_HUB_DISABLE_TELEMETRY="${HF_HUB_DISABLE_TELEMETRY:-1}"
+
 #Set DEQUANTIZE_F16=1 to pre-dequantize the GGUF to F16 with llama-quantize
 #(fallback if transformers can't read the source quant type directly).
 DEQUANTIZE_F16="${DEQUANTIZE_F16:-0}"

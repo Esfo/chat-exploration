@@ -113,34 +113,37 @@ def _run_all(args) -> None:
         sys.exit(f"Unknown --from stage {from_stage!r}. Choices: {', '.join(names)}")
     force_from_idx = names.index(from_stage) if from_stage else len(names)
 
-    def _mtime(rel):
-        """Newest mtime under an artifact path (file, or any file in a dir)."""
+    def _schema_ok(rel):
+        """True unless a produced parquet is missing columns its registered schema
+        requires (i.e. it was written by older code) — a precise, timestamp-free
+        staleness signal that catches schema changes without redoing valid work."""
+        from . import schemas
+        schema = schemas.SCHEMA_REGISTRY.get(rel)
+        if schema is None:
+            return True
         p = library.path(rel)
-        if not p.exists():
-            return None
-        if p.is_file():
-            return p.stat().st_mtime
-        return max((f.stat().st_mtime for f in p.rglob("*") if f.is_file()),
-                   default=p.stat().st_mtime)
+        try:
+            import pyarrow.parquet as pq
+            target = p if p.is_file() else next(p.rglob("*.parquet"))
+            have = set(pq.read_schema(target).names)
+        except Exception:  # noqa: BLE001 — unreadable: let the stage rerun
+            return False
+        return set(schema.names) <= have
 
     cascade = False  # once a stage reruns, everything downstream must too
     for i, stage in enumerate(v1):
-        #Resume by default, but rerun automatically when a stage is stale: outputs
-        #missing, an input newer than the outputs (an upstream stage was rerun), or
-        #an earlier stage already reran this pass. --force/--from override.
-        produced = stage.produces and all(library.path(p).exists() for p in stage.produces)
-        out_m = min([m for p in (stage.produces or [])
-                     if (m := _mtime(p)) is not None], default=None)
-        in_m = max([m for r in stage.requires
-                    if (m := _mtime(r)) is not None], default=None)
-        stale = (out_m is not None and in_m is not None and in_m > out_m)
-        force = getattr(args, "force", False) or i >= force_from_idx or cascade or stale
-        if produced and not force:
+        #Resume by default. Rerun a stage only when its outputs are missing or
+        #their schema is out of date (written by older code), or an earlier stage
+        #already reran this pass. No timestamp guessing — expensive, valid stages
+        #are never redone by surprise. --force / --from override.
+        exists = stage.produces and all(library.path(p).exists() for p in stage.produces)
+        schema_ok = exists and all(_schema_ok(p) for p in stage.produces)
+        forced = getattr(args, "force", False) or i >= force_from_idx
+        if exists and schema_ok and not forced and not cascade:
             print(f"=== skipping {stage.name} (up to date) ===", flush=True)
             continue
-        reason = ("forced" if (getattr(args, "force", False) or i >= force_from_idx)
-                  else "stale inputs" if stale else "upstream reran" if cascade
-                  else "missing outputs")
+        reason = ("forced" if forced else "upstream reran" if cascade
+                  else "missing outputs" if not exists else "schema out of date")
         print(f"=== running {stage.name} ({reason}) ===", flush=True)
         t0 = time.time()
         _run_stage(stage.name, args)
