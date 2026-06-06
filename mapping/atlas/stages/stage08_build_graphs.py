@@ -25,6 +25,10 @@ from ..sketches import ActiveBitset
 from ..storage import read_parquet, read_zarr_group, read_zarr_str
 from . import register
 
+#Per-byte popcount lookup, so bitset overlap is a vectorized table lookup
+#instead of an unpackbits allocation per edge.
+_POPCOUNT = np.array([bin(i).count("1") for i in range(256)], dtype=np.int32)
+
 
 @register("build-graphs", 8,
           requires=["activations/activation_sketches.zarr", "catalog/unit_index.parquet"],
@@ -63,6 +67,8 @@ def run(library: Library, backend: ModelBackend, layer_window: int | None = None
     activation_edges, lagged_edges, routing_edges = [], [], []
     layers = sorted(by_layer)
     chunk = max(1, config.graph_source_chunk)
+    bits = bitsets["bits"] if bitsets is not None else None
+    min_score = config.edge_min_score
 
     for src_layer in layers:
         src_idx = np.array(by_layer[src_layer])
@@ -82,17 +88,30 @@ def run(library: Library, backend: ModelBackend, layer_window: int | None = None
             top = np.argpartition(-sims, k - 1, axis=1)[:, :k]
             for si in range(sims.shape[0]):
                 su = uids[cidx[si]]
-                for tj in top[si]:
-                    tu = uids[tgt_idx[tj]]
+                tjs = top[si]
+                sc = sims[si, tjs]
+                keep = sc >= min_score
+                tjs = tjs[keep]; sc = sc[keep]
+                if not len(tjs):
+                    continue
+                #Vectorized co-firing overlap for this source's k targets at once
+                #(popcount on packed bytes — no per-edge unpackbits).
+                if bits is not None:
+                    a = bits[cidx[si]]
+                    b = bits[tgt_idx[tjs]]
+                    inter = _POPCOUNT[a & b].sum(axis=1)
+                    union = _POPCOUNT[a | b].sum(axis=1)
+                    ov = np.where(union > 0, inter / np.maximum(union, 1), 0.0)
+                else:
+                    ov = np.zeros(len(tjs))
+                act = 0.5 * sc + 0.5 * ov
+                for r in range(len(tjs)):
+                    tu = uids[tgt_idx[tjs[r]]]
                     if su == tu:
                         continue
-                    score = float(sims[si, tj])
-                    if score < config.edge_min_score:
-                        continue
                     tl = layer_of[tu]
-                    overlap = _overlap(bitsets, cidx[si], tgt_idx[tj])
-                    act_score = 0.5 * score + 0.5 * overlap
-                    activation_edges.append(_edge(su, tu, src_layer, tl, "activation_score", act_score))
+                    score = float(sc[r])
+                    activation_edges.append(_edge(su, tu, src_layer, tl, "activation_score", float(act[r])))
                     if tl > src_layer:
                         lagged_edges.append(_edge(su, tu, src_layer, tl, "lagged_score", score))
                         if type_of[su] == "attn_head":
@@ -142,16 +161,6 @@ def _load_bitsets(library):
         return None
     g = read_zarr_group(path)
     return {"uids": read_zarr_str(g, "unit_ids"), "bits": np.asarray(g["bitset"][:])}
-
-
-def _overlap(bitsets, i, j):
-    if bitsets is None:
-        return 0.0
-    a = np.unpackbits(bitsets["bits"][i])
-    b = np.unpackbits(bitsets["bits"][j])
-    inter = int(np.logical_and(a, b).sum())
-    union = int(np.logical_or(a, b).sum())
-    return inter / union if union else 0.0
 
 
 def _combine(library, config, layer_of):
