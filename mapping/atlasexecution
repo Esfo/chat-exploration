@@ -35,31 +35,17 @@ BATCH_SIZE="${BATCH_SIZE:-8}"
 MAX_MLP_NEURONS_PER_LAYER="${MAX_MLP_NEURONS_PER_LAYER:-0}"
 
 #Capture device. 'auto' uses the GPU when one is visible, else CPU. The heavy
-#stage is the capture forward pass; running it on a GPU is the only >10x speedup.
-#LOAD_IN_4BIT=1 (nf4) shrinks an 8B model to a few GB of VRAM so it fits on small
-#cards (e.g. an RTX 4050). Only capture uses the GPU — weight analysis stays on CPU.
+#stage is the capture forward pass; running it on a GPU is the big speedup.
+#
+#The GPU path streams weights one layer at a time (accelerate cpu_offload), so an
+#8B model runs on a small card (e.g. a 6 GB RTX 4050) at full fp16 precision with
+#only one layer resident at a time — no quantization, no bitsandbytes needed. If
+#the GPU load fails for any reason, capture falls back to CPU automatically.
+#Only capture uses the GPU; weight analysis always stays on CPU.
 DEVICE="${DEVICE:-auto}"
-LOAD_IN_4BIT="${LOAD_IN_4BIT:-1}"
-FOURBIT_FLAG=""
-if [ "$LOAD_IN_4BIT" = "1" ]; then
-  FOURBIT_FLAG="--load-in-4bit"
-fi
 
-#Reduce CUDA fragmentation so a tight-fitting model is less likely to OOM.
+#Reduce CUDA fragmentation for tight-fitting activations.
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
-
-#bitsandbytes ships prebuilt kernels per CUDA version. If your installed CUDA
-#(e.g. 13.2) has no matching binary, point bnb at the closest available one:
-#   BNB_CUDA_VERSION=133 ./atlasexecution
-#Capture will otherwise auto-fall back to CPU if the GPU/quant load fails.
-if [ -n "${BNB_CUDA_VERSION:-}" ]; then
-  export BNB_CUDA_VERSION
-fi
-
-#NOTE: an 8B model does not fully fit in a 6 GB GPU even at 4-bit; capture will
-#offload overflow layers to CPU automatically. For a fully-on-GPU (much faster)
-#run on a small card, capture a smaller model via SOURCE_MODEL, e.g.
-#   SOURCE_MODEL=llama3.2:3b ./atlasexecution
 
 #Set DEQUANTIZE_F16=1 to pre-dequantize the GGUF to F16 with llama-quantize
 #(fallback if transformers can't read the source quant type directly).
@@ -87,7 +73,6 @@ python3 -m atlas.cli --out "$LIBRARY_DIR" --threads "$THREADS" init \
   --tokens "$TARGET_TOKENS" \
   --max-mlp-neurons-per-layer "$MAX_MLP_NEURONS_PER_LAYER" \
   --device "$DEVICE" \
-  $FOURBIT_FLAG \
   $DEQUANT_FLAG
 
 python3 -m atlas.cli --out "$LIBRARY_DIR" --threads "$THREADS" run-all \
