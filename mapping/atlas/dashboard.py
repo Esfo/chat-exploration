@@ -90,6 +90,50 @@ def _hist(df: pd.DataFrame, col: str, title: str, bins: int = 40):
         st.bar_chart(df[col])
 
 
+def _scatter(df, x, y, color=None, size=None, title="", tooltip=None, height=320):
+    """Continuous scatter landscape — the workhorse plot of the atlas pages."""
+    if df.empty or x not in df.columns or y not in df.columns:
+        st.caption(f"No data for {title or f'{x} vs {y}'}.")
+        return
+    if not _HAS_ALT:
+        st.scatter_chart(df, x=x, y=y, color=color if color in df.columns else None)
+        return
+    enc = {"x": alt.X(f"{x}:Q", title=x), "y": alt.Y(f"{y}:Q", title=y)}
+    if color and color in df.columns:
+        typ = "N" if df[color].dtype == object else "Q"
+        enc["color"] = alt.Color(f"{color}:{typ}", title=color)
+    if size and size in df.columns:
+        enc["size"] = alt.Size(f"{size}:Q", title=size, legend=None)
+    enc["tooltip"] = [c for c in (tooltip or df.columns) if c in df.columns][:8]
+    ch = alt.Chart(df).mark_circle(opacity=0.5).encode(**enc).properties(height=height)
+    if title:
+        st.caption(title)
+    st.altair_chart(ch.interactive(), width="stretch")
+
+
+def _heatmap(df, x, y, val, title="", height=360):
+    if df.empty or not {x, y, val} <= set(df.columns):
+        st.caption(f"No data for {title}.")
+        return
+    if not _HAS_ALT:
+        st.dataframe(df, width="stretch")
+        return
+    ch = (alt.Chart(df).mark_rect()
+          .encode(x=alt.X(f"{x}:O", title=x), y=alt.Y(f"{y}:O", title=y),
+                  color=alt.Color(f"{val}:Q", title=val, scale=alt.Scale(scheme="magma")),
+                  tooltip=[x, y, val])
+          .properties(height=height))
+    if title:
+        st.caption(title)
+    st.altair_chart(ch, width="stretch")
+
+
+def _metric_strip(items: dict):
+    cols = st.columns(len(items))
+    for c, (label, val) in zip(cols, items.items()):
+        c.metric(label, val)
+
+
 #======================================================================
 # Pages
 #======================================================================
@@ -932,6 +976,324 @@ def page_sql(lib: str, tables: set[str]):
 # Main
 #======================================================================
 
+def page_library_health(lib: str, tables: set[str]):
+    st.header("Library Health")
+    st.caption("State of the on-disk model library — what exists, how big it is, "
+               "and whether the major artifacts are present.")
+    q_obj, _ = _connect(lib)
+    model = {}
+    arch = {}
+    try:
+        model = q_obj.library.read_json("manifest/model.json")
+        arch = q_obj.library.read_json("manifest/architecture.json")
+    except Exception:  # noqa: BLE001
+        pass
+
+    def _count(t):
+        if t not in tables:
+            return "—"
+        d = _sql(lib, f"SELECT count(*) c FROM {t}")
+        return int(d.iloc[0]["c"]) if not d.empty else 0
+
+    size_total = 0
+    lh = _sql(lib, "SELECT * FROM library_health") if "library_health" in tables else pd.DataFrame()
+    if not lh.empty:
+        size_total = int(lh["file_size_bytes"].sum())
+    _metric_strip({
+        "Model": str(model.get("model_path", "—")).split("/")[-1],
+        "Params": f"{int(model.get('approx_param_count',0))/1e9:.1f}B" if model.get("approx_param_count") else "—",
+        "Layers": int(arch.get("num_layers", 0)) or "—",
+        "Units": _count("unit_index"),
+        "Clusters": _count("cluster_index"),
+        "Edges": _count("unit_edges_combined"),
+        "Tokens": _count("token_index"),
+        "Size": f"{size_total/1e6:.0f} MB" if size_total else "—",
+    })
+
+    if lh.empty:
+        st.info("Run `export-dashboard-summaries` to populate the artifact health "
+                "table.")
+    else:
+        st.subheader("Artifact size by group")
+        grp = (lh.groupby("artifact_class")["file_size_bytes"].sum()
+               .sort_values(ascending=False) / 1e6).rename("MB")
+        st.bar_chart(grp)
+        st.subheader("Row-count scale (log)")
+        rc = lh[lh["row_count"] > 0].copy()
+        if not rc.empty:
+            rc = rc.sort_values("row_count", ascending=False).head(40)
+            if _HAS_ALT:
+                ch = (alt.Chart(rc).mark_bar().encode(
+                    x=alt.X("row_count:Q", scale=alt.Scale(type="log"), title="rows (log)"),
+                    y=alt.Y("artifact_path:N", sort="-x", title=None),
+                    tooltip=["artifact_path", "row_count", "file_size_bytes"])
+                    .properties(height=520))
+                st.altair_chart(ch, width="stretch")
+        with st.expander("All artifacts"):
+            st.dataframe(lh.sort_values("file_size_bytes", ascending=False),
+                         width="stretch", hide_index=True)
+
+    log_path = q_obj.library.path("manifest/run_log.jsonl")
+    if log_path.exists():
+        with st.expander("Run log (latest 25)"):
+            try:
+                st.dataframe(pd.read_json(log_path, lines=True).tail(25).iloc[::-1],
+                             width="stretch")
+            except Exception as e:  # noqa: BLE001
+                st.caption(f"Could not read run log: {e}")
+
+
+def page_cluster_mechanics(lib: str, tables: set[str]):
+    st.header("Cluster Mechanics")
+    st.caption("How clusters behave internally: coherence, size, specificity, and "
+               "read/write geometry. Each point is a cluster.")
+    if "cluster_quality" not in tables:
+        st.info("Run `export-dashboard-summaries` to populate cluster quality.")
+        return
+    cq = _sql(lib, "SELECT * FROM cluster_quality")
+    if cq.empty:
+        st.warning("No cluster quality rows.")
+        return
+    lvl = _sql(lib, "SELECT cluster_level, count(*) n FROM cluster_index GROUP BY cluster_level")
+    counts = {r.cluster_level: int(r.n) for r in lvl.itertuples()} if not lvl.empty else {}
+    _metric_strip({
+        "Clusters": len(cq),
+        "Local": counts.get("local", 0),
+        "Cross-layer": counts.get("xlayer", 0),
+        "Family": counts.get("family", 0),
+        "Med fire coh.": f"{cq['fire_coherence'].median():.3f}",
+        "Med struct coh.": f"{cq['structural_coherence'].median():.3f}",
+        "Largest": int(cq["member_count"].max()),
+    })
+    cq["log_members"] = np.log10(cq["member_count"].clip(lower=1))
+    c1, c2 = st.columns(2)
+    with c1:
+        _scatter(cq, "fire_coherence", "structural_coherence", color="cluster_level",
+                 size="member_count", title="Coherence field — behavioral vs structural")
+        _scatter(cq, "mean_read_norm", "mean_write_norm", color="source_score",
+                 size="member_count", title="Read/write geometry (color = source score)")
+    with c2:
+        _scatter(cq, "log_members", "mean_specificity", color="dominant_unit_type",
+                 title="Size vs specificity (x = log10 members)")
+        _scatter(cq, "mean_activation_rate", "mean_specificity", color="dominant_layer",
+                 size="member_count", title="Activation rate vs specificity")
+    giants = cq[cq["giant_component_warning"]]
+    if not giants.empty:
+        with st.expander(f"Suspicious giant components ({len(giants)})"):
+            st.dataframe(giants.sort_values("member_count", ascending=False),
+                         width="stretch", hide_index=True)
+
+
+def page_cluster_landscape(lib: str, tables: set[str]):
+    st.header("Cluster Landscape")
+    st.caption("The cluster universe as a continuous behavior-space map.")
+    if "cluster_embedding_2d" in tables:
+        emb = _sql(lib, "SELECT * FROM cluster_embedding_2d")
+        meta = _sql(lib, "SELECT cluster_id, member_count, source_score, sink_score, "
+                         "relay_score, cluster_level, dominant_layer FROM cluster_quality") \
+            if "cluster_quality" in tables else pd.DataFrame()
+        if not emb.empty and not meta.empty:
+            df = emb.merge(meta, on="cluster_id", how="left")
+            _scatter(df, "x", "y", color="dominant_layer", size="member_count",
+                     title="2D cluster behavior map (color = layer)")
+            _scatter(df, "x", "y", color="source_score", size="member_count",
+                     title="Role gradient (color = source score)")
+            return
+    st.info("2D cluster embeddings aren't built yet (Stage D — cluster embedding "
+            "export). Showing the role space directly as an interim map.")
+    if "cluster_quality" in tables:
+        cq = _sql(lib, "SELECT * FROM cluster_quality")
+        cq["log_members"] = np.log10(cq["member_count"].clip(lower=1)) if not cq.empty else 0
+        _scatter(cq, "source_score", "sink_score", color="relay_score",
+                 size="member_count", title="Role space — source vs sink (color = relay)")
+        _scatter(cq, "dominant_layer", "structural_coherence", color="cluster_level",
+                 size="member_count", title="Layer vs structural coherence")
+
+
+def page_signal_flow(lib: str, tables: set[str]):
+    st.header("Signal Flow")
+    st.caption("Where signals originate, travel, concentrate, and terminate — with "
+               "evidence types kept separate (\"could connect\" vs \"co-fires\").")
+    if "layer_flow_matrix" not in tables:
+        st.info("Run `export-dashboard-summaries` to populate the flow matrix.")
+        return
+    evs = _sql(lib, "SELECT DISTINCT evidence_type FROM layer_flow_matrix")
+    types = evs["evidence_type"].tolist() if not evs.empty else ["combined"]
+    c1, c2 = st.columns(2)
+    for col, default in ((c1, "combined"), (c2, "activation")):
+        with col:
+            ev = st.selectbox("Evidence", types,
+                              index=types.index(default) if default in types else 0,
+                              key=f"flow_{default}")
+            fm = _sql(lib, "SELECT source_layer, target_layer, total_score, edge_count "
+                           "FROM layer_flow_matrix WHERE evidence_type = ?", [ev])
+            _heatmap(fm, "source_layer", "target_layer", "total_score",
+                     title=f"Layer→layer flow — {ev}")
+    if "layer_summary" in tables:
+        ls = _sql(lib, "SELECT layer_id, mean_source_score, mean_sink_score, "
+                       "mean_relay_score FROM layer_summary ORDER BY layer_id")
+        if not ls.empty and ls[["mean_source_score"]].notna().any().any():
+            st.caption("Source / sink / relay by layer")
+            st.line_chart(ls.set_index("layer_id"))
+    if "cluster_quality" in tables:
+        cq = _sql(lib, "SELECT source_score, sink_score, relay_score, member_count "
+                       "FROM cluster_quality")
+        _scatter(cq, "source_score", "sink_score", color="relay_score",
+                 size="member_count", title="Cluster flow field (color = relay score)")
+
+
+def page_layer_dynamics(lib: str, tables: set[str]):
+    st.header("Layer Dynamics")
+    st.caption("How internal mechanics change as depth increases through the model.")
+    if "layer_summary" not in tables:
+        st.info("Run `export-dashboard-summaries` to populate the layer summary.")
+        return
+    ls = _sql(lib, "SELECT * FROM layer_summary ORDER BY layer_id")
+    if ls.empty:
+        return
+    _metric_strip({
+        "Layers": len(ls),
+        "Units/layer": int(ls["unit_count"].mean()),
+        "Clusters total": int(ls["cluster_count"].fillna(0).sum()) if "cluster_count" in ls else "—",
+    })
+    idx = ls.set_index("layer_id")
+    grp1 = [c for c in ["mean_activation_rate", "mean_specificity", "mean_burstiness"] if c in idx]
+    grp2 = [c for c in ["mean_read_norm", "mean_write_norm", "mean_weight_tail_ratio"] if c in idx]
+    grp3 = [c for c in ["mean_source_score", "mean_sink_score", "mean_relay_score"] if c in idx]
+    c1, c2 = st.columns(2)
+    with c1:
+        if grp1:
+            st.caption("Activation metrics by layer")
+            st.line_chart(idx[grp1])
+        if grp3 and idx[grp3].notna().any().any():
+            st.caption("Role scores by layer")
+            st.line_chart(idx[grp3])
+    with c2:
+        if grp2 and idx[grp2].notna().any().any():
+            st.caption("Static geometry by layer")
+            st.line_chart(idx[grp2])
+        if "cluster_count" in idx and idx["cluster_count"].notna().any():
+            st.caption("Clusters centered at each layer")
+            st.bar_chart(idx[["cluster_count"]])
+
+
+def page_activation_structure(lib: str, tables: set[str]):
+    st.header("Activation Structure")
+    st.caption("Empirical firing behavior across the calibration data (not static "
+               "weights). Scatter is sampled for speed.")
+    if not _has(tables, "unit_index", "activation_stats"):
+        st.info("Activation stats not available.")
+        return
+    df = _sql(lib, "SELECT u.layer_id, u.unit_type, a.activation_rate, "
+                   "a.specificity_score, a.burstiness_score "
+                   "FROM unit_index u JOIN activation_stats a USING (unit_id) "
+                   "USING SAMPLE 25000 ROWS")
+    st.caption(f"{len(df):,} units sampled.")
+    c1, c2 = st.columns(2)
+    with c1:
+        _scatter(df, "activation_rate", "specificity_score", color="layer_id",
+                 title="Activation rate vs specificity")
+    with c2:
+        _scatter(df, "activation_rate", "burstiness_score", color="unit_type",
+                 title="Burstiness landscape")
+    bylayer = _sql(lib, "SELECT layer_id, median_activation_rate, p90_activation_rate "
+                        "FROM layer_summary ORDER BY layer_id") \
+        if "layer_summary" in tables else pd.DataFrame()
+    if not bylayer.empty:
+        st.caption("Activation rate by layer (median & p90)")
+        st.line_chart(bylayer.set_index("layer_id"))
+
+
+def page_weight_geometry(lib: str, tables: set[str]):
+    st.header("Weight Geometry")
+    st.caption("Static weight structure — what the model is positioned to read and "
+               "write, independent of firing. Scatter is sampled.")
+    if not _has(tables, "unit_index", "unit_static_stats"):
+        st.info("Static stats not available.")
+        return
+    df = _sql(lib, "SELECT u.layer_id, u.unit_type, s.read_norm, s.write_norm, "
+                   "s.weight_tail_ratio, s.static_outlier_score "
+                   "FROM unit_index u JOIN unit_static_stats s USING (unit_id) "
+                   "USING SAMPLE 25000 ROWS")
+    st.caption(f"{len(df):,} units sampled.")
+    c1, c2 = st.columns(2)
+    with c1:
+        _scatter(df, "read_norm", "write_norm", color="layer_id",
+                 title="Read vs write norm")
+    with c2:
+        _scatter(df, "weight_tail_ratio", "static_outlier_score", color="unit_type",
+                 title="Weight-tail vs outlier score")
+    if "unit_edges_static_alignment" in tables:
+        al = _sql(lib, "SELECT source_layer, target_layer, "
+                       "sum(static_alignment_score) total_score "
+                       "FROM unit_edges_static_alignment "
+                       "GROUP BY source_layer, target_layer")
+        _heatmap(al, "source_layer", "target_layer", "total_score",
+                 title="Static alignment (architecture-permitted flow)")
+
+
+def page_evidence_strength(lib: str, tables: set[str]):
+    st.header("Evidence Strength")
+    st.caption("Why edges are believed to exist. The combined score is never shown "
+               "as if it were a single measurement — the evidence stack is explicit.")
+    if "evidence_profiles" not in tables:
+        st.info("Run `export-dashboard-summaries` to populate evidence profiles.")
+        return
+    ep = _sql(lib, "SELECT * FROM evidence_profiles")
+    if ep.empty:
+        return
+    st.caption(f"{len(ep):,} edges (sampled).")
+    dom = _sql(lib, "SELECT dominant_evidence_type, count(*) n FROM evidence_profiles "
+                    "GROUP BY dominant_evidence_type ORDER BY n DESC")
+    _metric_strip({
+        "Edges (sample)": len(ep),
+        "Median confidence": f"{ep['edge_confidence'].median():.2f}",
+        "Multi-evidence": int((ep["support_count"] > 1).sum()),
+        "Dominant type": dom.iloc[0]["dominant_evidence_type"] if not dom.empty else "—",
+    })
+    c1, c2 = st.columns(2)
+    with c1:
+        _scatter(ep, "combined_score", "edge_confidence", color="dominant_evidence_type",
+                 title="Combined score vs confidence (color = dominant evidence)")
+    with c2:
+        _scatter(ep, "static_alignment_score", "activation_score", color="edge_confidence",
+                 title="Disagreement map — static vs activation evidence")
+    if not dom.empty:
+        st.caption("Edges by dominant evidence type")
+        st.bar_chart(dom.set_index("dominant_evidence_type"))
+
+
+def page_histogram_lab(lib: str, tables: set[str]):
+    st.header("Histogram Lab")
+    st.caption("Fast comparison of precomputed distributions across indexed "
+               "categories.")
+    if "histogram_index" not in tables or "histogram_bins" not in tables:
+        st.info("Precomputed histograms not available (export-summaries stage).")
+        return
+    idx = _sql(lib, "SELECT DISTINCT metric_name FROM histogram_index ORDER BY 1")
+    if idx.empty:
+        st.warning("No histograms indexed.")
+        return
+    metric = st.selectbox("Metric", idx["metric_name"].tolist())
+    ents = _sql(lib, "SELECT histogram_id, entity_type, entity_id FROM histogram_index "
+                     "WHERE metric_name = ? LIMIT 5000", [metric])
+    st.caption(f"{len(ents)} histograms for {metric}. Pick entities to overlay.")
+    pick = st.multiselect("Overlay histograms (id)", ents["histogram_id"].tolist()[:200],
+                          default=ents["histogram_id"].tolist()[:3])
+    if pick:
+        ph = ",".join("?" for _ in pick)
+        bins = _sql(lib, f"SELECT histogram_id, bin_left, bin_right, count "
+                         f"FROM histogram_bins WHERE histogram_id IN ({ph})", pick)
+        if not bins.empty and _HAS_ALT:
+            bins["mid"] = (bins["bin_left"] + bins["bin_right"]) / 2
+            ch = (alt.Chart(bins).mark_line().encode(
+                x=alt.X("mid:Q", title=metric), y=alt.Y("count:Q", title="count"),
+                color="histogram_id:N").properties(height=320))
+            st.altair_chart(ch, width="stretch")
+        elif not bins.empty:
+            st.dataframe(bins, width="stretch")
+
+
 def main():
     st.set_page_config(page_title="Atlas Explorer", layout="wide")
     st.title("🧭 Atlas Explorer")
@@ -947,25 +1309,27 @@ def main():
         st.stop()
 
     tables = _tables(lib)
-    page = st.sidebar.radio("View", ["Overview", "Extraction Quality", "Plot Lab",
-                                     "Clusters", "Units",
-                                     "Connection graph", "SQL console"])
+    #The fixed-dashboard page list from the plan (docs/dashboard_plan.md): trust
+    #pages first, atlas pages in the middle, expert tools last.
+    pages = {
+        "Library Health": page_library_health,
+        "Extraction Quality": page_extraction_quality,
+        "Cluster Mechanics": page_cluster_mechanics,
+        "Cluster Landscape": page_cluster_landscape,
+        "Cluster Drilldown": page_clusters,
+        "Signal Flow": page_signal_flow,
+        "Layer Dynamics": page_layer_dynamics,
+        "Activation Structure": page_activation_structure,
+        "Weight Geometry": page_weight_geometry,
+        "Evidence Strength": page_evidence_strength,
+        "Unit Explorer": page_units,
+        "Histogram Lab": page_histogram_lab,
+        "Custom Plot Studio": page_plotlab,
+        "SQL Workbench": page_sql,
+    }
+    page = st.sidebar.radio("View", list(pages))
     st.sidebar.caption(f"{len(tables)} tables available")
-
-    if page == "Overview":
-        page_overview(lib, tables)
-    elif page == "Extraction Quality":
-        page_extraction_quality(lib, tables)
-    elif page == "Plot Lab":
-        page_plotlab(lib, tables)
-    elif page == "Clusters":
-        page_clusters(lib, tables)
-    elif page == "Units":
-        page_units(lib, tables)
-    elif page == "Connection graph":
-        page_graph(lib, tables)
-    else:
-        page_sql(lib, tables)
+    pages[page](lib, tables)
 
 
 if __name__ == "__main__":
