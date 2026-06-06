@@ -61,9 +61,12 @@ def run(library: Library, backend: ModelBackend, **kwargs):
     layer_of = {u["unit_id"]: u["layer_id"] for u in units}
     type_of = {u["unit_id"]: u["unit_type"] for u in units}
 
+    print("[cluster] loading activation edges…", flush=True)
     act_edges = read_parquet(library.path("graphs/unit_edges_activation.parquet")).to_pylist()
     lag_path = library.path("graphs/unit_edges_lagged.parquet")
     lag_edges = read_parquet(lag_path).to_pylist() if lag_path.exists() else []
+    print(f"[cluster] {len(act_edges):,} activation + {len(lag_edges):,} lagged edges; "
+          f"building local clusters (mutual_knn={config.mutual_knn})…", flush=True)
 
     index_rows, membership_rows, hierarchy_rows, exemplar_rows = [], [], [], []
 
@@ -111,6 +114,9 @@ def run(library: Library, backend: ModelBackend, **kwargs):
             membership_rows.append(_member(cid, m, "unit", 1.0, rank))
             local_of_unit[m] = cid
         local_clusters[cid] = members
+
+    print(f"[cluster] {len(local_clusters):,} local clusters; "
+          f"computing centroids/exemplars and cross-layer levels…", flush=True)
 
     #--- centroids + exemplars from activation signatures ---------------
     centroid_ids, centroid_vecs = _centroids_and_exemplars(

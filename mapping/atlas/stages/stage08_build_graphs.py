@@ -21,6 +21,7 @@ import numpy as np
 
 from ..manifest import Library
 from ..model_backend import ModelBackend
+from ..progress import Progress
 from ..sketches import ActiveBitset
 from ..storage import read_parquet, read_zarr_group, read_zarr_str
 from . import register
@@ -70,6 +71,12 @@ def run(library: Library, backend: ModelBackend, layer_window: int | None = None
     bits = bitsets["bits"] if bitsets is not None else None
     min_score = config.edge_min_score
 
+    total_sources = sum(len(v) for v in by_layer.values())
+    print(f"[build-graphs] {total_sources} source units across {len(layers)} layers, "
+          f"window +/-{layer_window}, top_k={config.edges_top_k}, chunk={chunk}"
+          f"{' (sampled)' if sampled else ' (full coverage)'}", flush=True)
+    prog = Progress("build-graphs", total_sources, every=chunk, step_label="batch")
+
     for src_layer in layers:
         src_idx = np.array(by_layer[src_layer])
         if not len(src_idx):
@@ -116,6 +123,9 @@ def run(library: Library, backend: ModelBackend, layer_window: int | None = None
                         lagged_edges.append(_edge(su, tu, src_layer, tl, "lagged_score", score))
                         if type_of[su] == "attn_head":
                             routing_edges.append(_edge(su, tu, src_layer, tl, "attention_routing_score", score))
+            prog.tick(len(cidx), extra=f"L{src_layer}  {len(activation_edges):,} edges")
+    prog.done(extra=f"{len(activation_edges):,} activation edges")
+    print("[build-graphs] merging evidence into combined graph…", flush=True)
 
     #Coverage records so the dashboard can show graph honesty (Issue 7).
     participation = [{"unit_id": u["unit_id"], "layer_id": u["layer_id"],
