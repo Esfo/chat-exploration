@@ -1461,35 +1461,99 @@ def page_evidence_strength(lib: str, tables: set[str]):
         st.bar_chart(dom.set_index("dominant_evidence_type"))
 
 
-def page_histogram_lab(lib: str, tables: set[str]):
-    st.header("Histogram Lab")
-    st.caption("Fast comparison of precomputed distributions across indexed "
-               "categories.")
-    if "histogram_index" not in tables or "histogram_bins" not in tables:
-        st.info("Precomputed histograms not available (export-summaries stage).")
+def page_distributions(lib: str, tables: set[str]):
+    st.header("Distribution Lab")
+    st.caption("Smooth distribution (density) plots — overlay and compare how a "
+               "metric is distributed across categories, not binned bars.")
+
+    #Curated sources: (sql, metric columns, grouping columns). Unit/edge sources
+    #are sampled so density estimation stays fast.
+    sources: dict[str, tuple] = {}
+    if "cluster_quality" in tables:
+        sources["Clusters"] = (
+            "SELECT * FROM cluster_quality",
+            ["fire_coherence", "structural_coherence", "mean_activation_rate",
+             "mean_specificity", "mean_read_norm", "mean_write_norm",
+             "source_score", "sink_score", "relay_score", "member_count"],
+            ["cluster_level", "dominant_unit_type"])
+    if _has(tables, "unit_index", "activation_stats"):
+        joins = "unit_index u JOIN activation_stats a USING (unit_id)"
+        cols = ("u.layer_id, u.unit_type, a.activation_rate, a.specificity_score, "
+                "a.burstiness_score")
+        metrics = ["activation_rate", "specificity_score", "burstiness_score"]
+        if "unit_static_stats" in tables:
+            joins += " JOIN unit_static_stats s USING (unit_id)"
+            cols += ", s.read_norm, s.write_norm, s.weight_tail_ratio"
+            metrics += ["read_norm", "write_norm", "weight_tail_ratio"]
+        sources["Units (sampled)"] = (
+            f"SELECT {cols} FROM {joins} USING SAMPLE 30000 ROWS",
+            metrics, ["unit_type", "layer_id"])
+    if "evidence_profiles" in tables:
+        sources["Edges (sampled)"] = (
+            "SELECT * FROM evidence_profiles",
+            ["combined_score", "edge_confidence", "activation_score",
+             "static_alignment_score", "evidence_entropy", "disagreement_score"],
+            ["dominant_evidence_type", "source_layer"])
+    if not sources:
+        st.info("No summary tables to plot. Run the export-dashboard-summaries stage.")
         return
-    idx = _sql(lib, "SELECT DISTINCT metric_name FROM histogram_index ORDER BY 1")
-    if idx.empty:
-        st.warning("No histograms indexed.")
+
+    c1, c2, c3, c4 = st.columns(4)
+    src = c1.selectbox("Data", list(sources))
+    sql, metrics, groups = sources[src]
+    metric = c2.selectbox("Metric", metrics)
+    group = c3.selectbox("Compare by", ["(none)"] + groups)
+    style = c4.selectbox("Plot", ["Overlaid density", "Ridgeline", "Box plot"])
+
+    df = _sql(lib, sql)
+    if df.empty or metric not in df.columns:
+        st.warning("No data for this selection.")
         return
-    metric = st.selectbox("Metric", idx["metric_name"].tolist())
-    ents = _sql(lib, "SELECT histogram_id, entity_type, entity_id FROM histogram_index "
-                     "WHERE metric_name = ? LIMIT 5000", [metric])
-    st.caption(f"{len(ents)} histograms for {metric}. Pick entities to overlay.")
-    pick = st.multiselect("Overlay histograms (id)", ents["histogram_id"].tolist()[:200],
-                          default=ents["histogram_id"].tolist()[:3])
-    if pick:
-        ph = ",".join("?" for _ in pick)
-        bins = _sql(lib, f"SELECT histogram_id, bin_left, bin_right, count "
-                         f"FROM histogram_bins WHERE histogram_id IN ({ph})", pick)
-        if not bins.empty and _HAS_ALT:
-            bins["mid"] = (bins["bin_left"] + bins["bin_right"]) / 2
-            ch = (alt.Chart(bins).mark_line().encode(
-                x=alt.X("mid:Q", title=metric), y=alt.Y("count:Q", title="count"),
-                color="histogram_id:N").properties(height=320))
-            st.altair_chart(ch, width="stretch")
-        elif not bins.empty:
-            st.dataframe(bins, width="stretch")
+    df = df.dropna(subset=[metric])
+    grouped = group != "(none)" and group in df.columns
+    if grouped:
+        df = df.dropna(subset=[group]).copy()
+        df[group] = df[group].astype(str)
+        #Keep the legend readable: top 8 groups by size.
+        top = df[group].value_counts().head(8).index
+        df = df[df[group].isin(top)]
+    st.caption(f"{len(df):,} rows" + (f" · {df[group].nunique()} groups" if grouped else ""))
+
+    if not _HAS_ALT:
+        st.bar_chart(df[metric])
+        return
+    _distribution_chart(df, metric, group if grouped else None, style)
+
+
+def _distribution_chart(df, metric, group, style):
+    if style == "Box plot":
+        if group:
+            ch = alt.Chart(df).mark_boxplot().encode(
+                x=alt.X(f"{group}:N"), y=alt.Y(f"{metric}:Q"), color=f"{group}:N")
+        else:
+            ch = alt.Chart(df).mark_boxplot().encode(y=alt.Y(f"{metric}:Q"))
+        st.altair_chart(ch.properties(height=380), width="stretch")
+        return
+
+    dens = alt.Chart(df).transform_density(
+        metric, as_=[metric, "density"],
+        groupby=[group] if group else []).mark_area(opacity=0.5)
+
+    if style == "Ridgeline" and group:
+        ch = (dens.encode(
+            x=alt.X(f"{metric}:Q", title=metric),
+            y=alt.Y("density:Q", axis=None, scale=alt.Scale(range=[60, 0])),
+            color=alt.Color(f"{group}:N", legend=None),
+            row=alt.Row(f"{group}:N", title=None,
+                        header=alt.Header(labelAngle=0, labelAlign="left")))
+            .properties(height=46))
+    else:  # Overlaid density
+        enc = dict(x=alt.X(f"{metric}:Q", title=metric),
+                   y=alt.Y("density:Q", title="density"))
+        if group:
+            enc["color"] = alt.Color(f"{group}:N")
+        ch = dens.encode(**enc).properties(height=400)
+    st.altair_chart(ch, width="stretch")
 
 
 def main():
@@ -1521,7 +1585,7 @@ def main():
         "Weight Geometry": page_weight_geometry,
         "Evidence Strength": page_evidence_strength,
         "Unit Explorer": page_units,
-        "Histogram Lab": page_histogram_lab,
+        "Distribution Lab": page_distributions,
         "Custom Plot Studio": page_plotlab,
         "SQL Workbench": page_sql,
     }
