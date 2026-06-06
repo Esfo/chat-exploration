@@ -76,7 +76,7 @@ python3 -m atlas.cli --out "$LIBRARY_DIR" --threads "$THREADS" init \
   $DEQUANT_FLAG
 
 python3 -m atlas.cli --out "$LIBRARY_DIR" --threads "$THREADS" run-all \
-  --batch-size "$BATCH_SIZE"
+  --batch-size "$BATCH_SIZE" "$@"
 
 echo
 echo "Library written to: $LIBRARY_DIR"
