@@ -17,3 +17,6 @@ torch>=2.1
 
 # Optional acceleration for the unit/cluster vector indexes (stage 13).
 # faiss-cpu>=1.7
+
+# Optional: enables UMAP cluster embeddings (Cluster Landscape). PCA is used if absent.
+# umap-learn

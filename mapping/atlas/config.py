@@ -250,6 +250,8 @@ LAYOUT = {
         "summaries/cluster_member_view.parquet",
         "summaries/cluster_edge_neighborhoods.parquet",
         "summaries/cluster_metric_baselines.parquet",
+        "summaries/cluster_flow_corridors.parquet",
+        "summaries/cluster_family_hulls.parquet",
     ],
     "indexes": [
         "indexes/atlas.duckdb",

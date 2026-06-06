@@ -35,7 +35,9 @@ _KNN = 10
           requires=["clusters/cluster_stats.parquet", "clusters/cluster_index.parquet"],
           produces=["summaries/cluster_embedding_2d.parquet",
                     "summaries/cluster_member_view.parquet",
-                    "summaries/cluster_edge_neighborhoods.parquet"])
+                    "summaries/cluster_edge_neighborhoods.parquet",
+                    "summaries/cluster_flow_corridors.parquet",
+                    "summaries/cluster_family_hulls.parquet"])
 def run(library: Library, backend: ModelBackend, **kwargs):
     config = library.config()
     stats = read_parquet(library.path("clusters/cluster_stats.parquet")).to_pylist()
@@ -74,6 +76,11 @@ def run(library: Library, backend: ModelBackend, **kwargs):
     nn_rows = _nearest(cids, X, _KNN)
     library.commit_table("summaries/cluster_nearest_neighbors.parquet", nn_rows,
                          "summaries", "export-cluster-views")
+
+    #--- flow corridors + family hulls (Signal Flow / Landscape) --------
+    xy_by_cid = {cids[i]: (float(xy[i, 0]), float(xy[i, 1])) for i in range(len(cids))}
+    _flow_corridors(library, index)
+    _family_hulls(library, xy_by_cid)
 
     #--- materialized drilldown views via DuckDB ------------------------
     _duckdb_views(library)
@@ -148,6 +155,77 @@ def _nearest(cids, X, k):
                 rows.append({"cluster_id": cids[i], "neighbor_cluster_id": cids[j],
                              "rank": rank, "similarity": float(sims[r, j])})
     return rows
+
+
+def _flow_corridors(library: Library, index: dict, top_n: int = 200):
+    """Top cluster-to-cluster chains by total flow, with endpoint layers attached."""
+    path = library.path("graphs/cluster_edges.parquet")
+    rows = []
+    if path.exists():
+        edges = read_parquet(path).to_pylist()
+        edges.sort(key=lambda e: float(e.get("sum_combined_score") or 0.0), reverse=True)
+        for e in edges[:top_n]:
+            s, t = e["source_cluster_id"], e["target_cluster_id"]
+            rows.append({
+                "source_cluster_id": s, "target_cluster_id": t,
+                "source_layer": int(index.get(s, {}).get("dominant_layer", -1)),
+                "target_layer": int(index.get(t, {}).get("dominant_layer", -1)),
+                "edge_count": int(e.get("edge_count", 0) or 0),
+                "sum_combined_score": float(e.get("sum_combined_score") or 0.0),
+            })
+    library.commit_table("summaries/cluster_flow_corridors.parquet", rows,
+                         "summaries", "export-cluster-views")
+
+
+def _family_hulls(library: Library, xy_by_cid: dict):
+    """Convex hull (in embedding space) of the local clusters under each family."""
+    hpath = library.path("clusters/cluster_hierarchy.parquet")
+    rows = []
+    if hpath.exists():
+        hier = read_parquet(hpath).to_pylist()
+        parent = {h["child_cluster_id"]: h["parent_cluster_id"] for h in hier}
+
+        def root_family(cid):
+            seen = set()
+            while cid in parent and cid not in seen:
+                seen.add(cid)
+                cid = parent[cid]
+            return cid
+
+        fam_points: dict[str, list] = {}
+        for cid, xy in xy_by_cid.items():
+            fam = root_family(cid)
+            if fam != cid:  # only clusters that roll up to a family
+                fam_points.setdefault(fam, []).append(xy)
+        for fam, pts in fam_points.items():
+            hull = _convex_hull(pts)
+            for order, (x, y) in enumerate(hull):
+                rows.append({"family_cluster_id": fam, "vertex_order": order,
+                             "x": float(x), "y": float(y)})
+    library.commit_table("summaries/cluster_family_hulls.parquet", rows,
+                         "summaries", "export-cluster-views")
+
+
+def _convex_hull(points):
+    """Andrew's monotone chain — pure-python, no scipy. Returns hull vertices."""
+    pts = sorted(set((round(x, 6), round(y, 6)) for x, y in points))
+    if len(pts) <= 2:
+        return pts
+
+    def cross(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+    lower = []
+    for p in pts:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], p) <= 0:
+            lower.pop()
+        lower.append(p)
+    upper = []
+    for p in reversed(pts):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], p) <= 0:
+            upper.pop()
+        upper.append(p)
+    return lower[:-1] + upper[:-1]
 
 
 def _duckdb_views(library: Library):

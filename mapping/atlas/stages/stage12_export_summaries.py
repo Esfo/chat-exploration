@@ -54,6 +54,10 @@ def run(library: Library, backend: ModelBackend, **kwargs):
             by_cluster.setdefault(("cluster", m["cluster_id"]), []).append(m["member_id"])
 
     entities = {**by_layer, **by_type, **by_cluster}
+    #Role-group entities (plan s15): units belonging to clusters that score in the
+    #top quartile of each role/structure metric, so the Histogram Lab can compare
+    #"source-like" vs "sink-like" vs "high-specificity" populations.
+    entities.update(_role_group_entities(library, by_cluster))
 
     #Global ranges + baseline distribution per metric.
     global_vals = {met: np.array([unit_vals[u][met] for u in unit_vals
@@ -115,6 +119,35 @@ def run(library: Library, backend: ModelBackend, **kwargs):
                 histograms=len(hist_index), topk=len(topk), views=len(views))
     library.update_artifact_versions("export-summaries")
     return {"histograms": len(hist_index), "views": len(views)}
+
+
+def _role_group_entities(library, by_cluster):
+    """Map role-group names to the union of member units of top-quartile clusters."""
+    path = library.path("clusters/cluster_stats.parquet")
+    if not path.exists():
+        return {}
+    stats = read_parquet(path).to_pylist()
+    if not stats:
+        return {}
+    cid_units = {cid: units for (etype, cid), units in by_cluster.items()}
+    role_metrics = {
+        "source_like": "source_score", "sink_like": "sink_score",
+        "relay_like": "relay_score", "routing_heavy": "routing_score",
+        "high_specificity": "mean_specificity", "high_write": "mean_write_norm",
+    }
+    out = {}
+    for name, metric in role_metrics.items():
+        vals = np.array([float(s.get(metric) or 0.0) for s in stats])
+        if not vals.size:
+            continue
+        thr = float(np.quantile(vals, 0.75))
+        members = []
+        for s in stats:
+            if float(s.get(metric) or 0.0) >= thr:
+                members += cid_units.get(s["cluster_id"], [])
+        if members:
+            out[("role", name)] = members
+    return out
 
 
 def _unit_value_table(library, units):

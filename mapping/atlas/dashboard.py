@@ -13,6 +13,7 @@ in the sidebar or via ATLAS_LIBRARY_DIR.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
@@ -713,6 +714,16 @@ def page_plotlab(lib: str, tables: set[str]):
     st.caption("Build any chart from any data: pick a dataset, columns, chart type, "
                "filters, and aggregation.")
 
+    #--- saved chart specs (Stage H) ------------------------------------
+    saved_dir = _saved_dir(lib)
+    saved = sorted(p.name for p in saved_dir.glob("*.json")) if saved_dir.exists() else []
+    if saved:
+        with st.expander(f"Saved charts ({len(saved)})"):
+            pick = st.selectbox("Load a saved chart", ["(none)"] + saved)
+            if pick != "(none)" and st.button("Render saved chart"):
+                _render_saved(lib, saved_dir / pick)
+                st.divider()
+
     datasets = _datasets(tables)
     #Offer the curated joins first, then every raw table/view.
     options = list(datasets) + [f"raw: {t}" for t in sorted(tables)]
@@ -813,8 +824,43 @@ def page_plotlab(lib: str, tables: set[str]):
         if chart is not None:
             st.altair_chart(chart, width="stretch")
 
+        #--- save this chart spec ---------------------------------------
+        with st.expander("Save this chart"):
+            name = st.text_input("Name", value="my_chart")
+            if st.button("Save chart spec") and name:
+                spec = {"base_sql": base_sql, "where_sql": where_sql,
+                        "limit": int(limit), "chart_type": chart_type, "enc": enc}
+                _saved_dir(lib).mkdir(parents=True, exist_ok=True)
+                fn = _saved_dir(lib) / f"{name.replace('/', '_')}.json"
+                fn.write_text(json.dumps(spec, indent=2))
+                st.success(f"Saved to {fn}")
+
     st.download_button("Download CSV", df.to_csv(index=False), "atlas_plotlab.csv",
                        "text/csv")
+
+
+def _saved_dir(lib: str):
+    return Path(lib) / "summaries" / "saved_charts"
+
+
+def _render_saved(lib: str, path):
+    """Re-render a saved chart spec from its stored SQL + encoding."""
+    try:
+        spec = json.loads(path.read_text())
+    except Exception as e:  # noqa: BLE001
+        st.warning(f"Could not read saved chart: {e}")
+        return
+    sql = f"SELECT * FROM ({spec['base_sql']}) _t{spec.get('where_sql','')} LIMIT {spec.get('limit',20000)}"
+    df = _sql(lib, sql)
+    st.caption(f"Saved chart: {path.stem} — {len(df)} rows")
+    if df.empty:
+        return
+    if spec["chart_type"] == "Table" or not _HAS_ALT:
+        st.dataframe(df, width="stretch", height=400)
+        return
+    chart = _build_chart(df, spec["chart_type"], spec.get("enc", {}), "(none)")
+    if chart is not None:
+        st.altair_chart(chart, width="stretch")
 
 
 def _histogram(lib, base_sql, where_sql, schema, none):
@@ -1192,11 +1238,14 @@ def page_cluster_landscape(lib: str, tables: set[str]):
                          "relay_score, cluster_level, dominant_layer FROM cluster_quality") \
             if "cluster_quality" in tables else pd.DataFrame()
         if not emb.empty and not meta.empty:
+            method = emb["embedding_method"].iloc[0] if "embedding_method" in emb else "?"
+            st.caption(f"Embedding method: **{method}** "
+                       f"(install umap-learn for a UMAP map).")
             df = emb.merge(meta, on="cluster_id", how="left")
-            _scatter(df, "x", "y", color="dominant_layer", size="member_count",
-                     title="2D cluster behavior map (color = layer)")
-            _scatter(df, "x", "y", color="source_score", size="member_count",
-                     title="Role gradient (color = source score)")
+            hulls = _sql(lib, "SELECT * FROM cluster_family_hulls ORDER BY family_cluster_id, "
+                              "vertex_order") if "cluster_family_hulls" in tables else pd.DataFrame()
+            _embedding_map(df, "dominant_layer", "2D cluster behavior map (color = layer)", hulls)
+            _embedding_map(df, "source_score", "Role gradient (color = source score)", hulls)
             return
     st.info("2D cluster embeddings aren't built yet (Stage D — cluster embedding "
             "export). Showing the role space directly as an interim map.")
@@ -1207,6 +1256,25 @@ def page_cluster_landscape(lib: str, tables: set[str]):
                  size="member_count", title="Role space — source vs sink (color = relay)")
         _scatter(cq, "dominant_layer", "structural_coherence", color="cluster_level",
                  size="member_count", title="Layer vs structural coherence")
+
+
+def _embedding_map(df, color, title, hulls):
+    """Cluster embedding scatter with optional family convex-hull outlines."""
+    if not _HAS_ALT:
+        _scatter(df, "x", "y", color=color, size="member_count", title=title)
+        return
+    st.caption(title)
+    pts = (alt.Chart(df).mark_circle(opacity=0.55).encode(
+        x=alt.X("x:Q", title=None), y=alt.Y("y:Q", title=None),
+        size=alt.Size("member_count:Q", legend=None),
+        color=alt.Color(f"{color}:Q", scale=alt.Scale(scheme="viridis")),
+        tooltip=["cluster_id", "cluster_level", "dominant_layer", "member_count"])
+        .properties(height=420))
+    layers = [pts]
+    if hulls is not None and not hulls.empty:
+        layers.append(alt.Chart(hulls).mark_line(opacity=0.3, color="gray").encode(
+            x="x:Q", y="y:Q", detail="family_cluster_id:N", order="vertex_order:Q"))
+    st.altair_chart(alt.layer(*layers).interactive(), width="stretch")
 
 
 def page_signal_flow(lib: str, tables: set[str]):
@@ -1239,6 +1307,16 @@ def page_signal_flow(lib: str, tables: set[str]):
                        "FROM cluster_quality")
         _scatter(cq, "source_score", "sink_score", color="relay_score",
                  size="member_count", title="Cluster flow field (color = relay score)")
+
+    if "cluster_flow_corridors" in tables:
+        st.subheader("Top flow corridors")
+        st.caption("Strongest cluster-to-cluster chains, positioned by layer.")
+        co = _sql(lib, "SELECT * FROM cluster_flow_corridors "
+                       "ORDER BY sum_combined_score DESC LIMIT 200")
+        if not co.empty:
+            _scatter(co, "source_layer", "target_layer", color="sum_combined_score",
+                     size="edge_count", title="Corridors (source layer → target layer)")
+            st.dataframe(co.head(30), width="stretch", hide_index=True)
 
 
 def page_layer_dynamics(lib: str, tables: set[str]):
