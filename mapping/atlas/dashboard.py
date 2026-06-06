@@ -342,7 +342,10 @@ def _density_chart(aq: pd.DataFrame):
 
 
 def page_clusters(lib: str, tables: set[str]):
-    st.header("Clusters")
+    st.header("Cluster Drilldown")
+    st.caption("Everything important about one cluster in one place: where it "
+               "lives, how its members fire, what feeds in/out, and how it "
+               "compares to baselines.")
     if "cluster_index" not in tables:
         st.info("No cluster_index in this library.")
         return
@@ -394,35 +397,89 @@ def page_clusters(lib: str, tables: set[str]):
     if not cid:
         return
 
-    q_obj, _ = _connect(lib)
+    _cluster_drilldown(lib, tables, cid)
 
-    #Role profile of the selected cluster.
-    if "cluster_stats" in tables:
-        roles = _sql(lib, "SELECT source_score, sink_score, relay_score, routing_score "
-                          "FROM cluster_stats WHERE cluster_id = ?", [cid])
-        if not roles.empty:
-            st.subheader("Role profile")
-            prof = roles.iloc[0].rename({"source_score": "source", "sink_score": "sink",
-                                         "relay_score": "relay",
-                                         "routing_score": "routing"})
-            st.bar_chart(prof)
 
-    left, right = st.columns(2)
-    with left:
-        st.subheader("Members")
-        members = q_obj.units_in_cluster(cid)
-        st.caption(f"{len(members)} units")
-        st.dataframe(pd.DataFrame({"unit_id": members}), width="stretch", height=260)
-    with right:
-        st.subheader("Signal flow")
-        up = q_obj.upstream_clusters(cid)
-        down = q_obj.downstream_clusters(cid)
-        st.write("**Upstream (feeds in):**")
-        st.dataframe(pd.DataFrame(up, columns=["cluster_id", "score"]).head(15),
-                     width="stretch")
-        st.write("**Downstream (feeds out):**")
-        st.dataframe(pd.DataFrame(down, columns=["cluster_id", "score"]).head(15),
-                     width="stretch")
+def _cluster_drilldown(lib: str, tables: set[str], cid: str):
+    #Header card from cluster_stats + index.
+    hdr = _sql(lib, "SELECT c.cluster_level, c.dominant_unit_type, c.member_count, "
+                    "c.layer_min, c.layer_max, c.giant_component_warning, "
+                    "s.source_score, s.sink_score, s.relay_score, s.routing_score, "
+                    "s.fire_coherence, s.structural_coherence "
+                    "FROM cluster_index c LEFT JOIN cluster_stats s USING (cluster_id) "
+                    "WHERE c.cluster_id = ?", [cid])
+    if not hdr.empty:
+        h = hdr.iloc[0]
+        _metric_strip({
+            "Level": h["cluster_level"], "Members": int(h["member_count"]),
+            "Layers": f"{int(h['layer_min'])}–{int(h['layer_max'])}",
+            "Type": h["dominant_unit_type"],
+            "Fire coh.": f"{(h['fire_coherence'] or 0):.2f}",
+            "Struct coh.": f"{(h['structural_coherence'] or 0):.2f}",
+        })
+        if bool(h.get("giant_component_warning")):
+            st.warning("This cluster is flagged as a possible over-merged giant.")
+
+    #Member landscapes from the precomputed member view (no live mega-joins).
+    if "cluster_member_view" in tables:
+        mv = _sql(lib, "SELECT * FROM cluster_member_view WHERE cluster_id = ?", [cid])
+        st.subheader(f"Members ({len(mv)})")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            _scatter(mv, "layer_id", "membership_rank", color="unit_type",
+                     title="Where it lives (layer × rank)")
+        with c2:
+            _scatter(mv, "activation_rate", "specificity_score", color="layer_id",
+                     title="Member activation landscape")
+        with c3:
+            _scatter(mv, "read_norm", "write_norm", color="unit_type",
+                     title="Member read/write geometry")
+        with st.expander("Member table"):
+            st.dataframe(mv, width="stretch", hide_index=True)
+
+    #Evidence / role profile.
+    if "cluster_stats" in tables and not hdr.empty:
+        st.subheader("Role profile")
+        prof = hdr.iloc[0][["source_score", "sink_score", "relay_score", "routing_score"]]
+        st.bar_chart(prof.rename({"source_score": "source", "sink_score": "sink",
+                                  "relay_score": "relay", "routing_score": "routing"}))
+
+    #Upstream / downstream from the precomputed neighborhoods.
+    if "cluster_edge_neighborhoods" in tables:
+        st.subheader("Signal neighborhood")
+        nb = _sql(lib, "SELECT direction, other_cluster_id, edge_count, "
+                       "sum_combined_score FROM cluster_edge_neighborhoods "
+                       "WHERE cluster_id = ? ORDER BY sum_combined_score DESC", [cid])
+        l, r = st.columns(2)
+        l.write("**Upstream (feeds in)**")
+        l.dataframe(nb[nb["direction"] == "upstream"].drop(columns="direction"),
+                    width="stretch", hide_index=True)
+        r.write("**Downstream (feeds out)**")
+        r.dataframe(nb[nb["direction"] == "downstream"].drop(columns="direction"),
+                    width="stretch", hide_index=True)
+
+    #Baseline comparison.
+    if "cluster_metric_baselines" in tables:
+        bl = _sql(lib, "SELECT * FROM cluster_metric_baselines WHERE cluster_id = ?", [cid])
+        if not bl.empty:
+            b = bl.iloc[0]
+            comp = pd.DataFrame({
+                "metric": ["activation_rate", "specificity"],
+                "cluster": [b.get("mean_activation_rate"), b.get("mean_specificity")],
+                "layer/type baseline": [b.get("layer_activation_rate"), b.get("type_specificity")],
+                "global baseline": [b.get("global_activation_rate"), b.get("global_specificity")],
+            })
+            st.subheader("Vs baselines")
+            st.dataframe(comp, width="stretch", hide_index=True)
+
+    #Nearest clusters.
+    if "cluster_nearest_neighbors" in tables:
+        nn = _sql(lib, "SELECT neighbor_cluster_id, rank, similarity "
+                       "FROM cluster_nearest_neighbors WHERE cluster_id = ? "
+                       "ORDER BY rank", [cid])
+        if not nn.empty:
+            with st.expander("Nearest clusters (behavior space)"):
+                st.dataframe(nn, width="stretch", hide_index=True)
 
 
 def page_units(lib: str, tables: set[str]):
