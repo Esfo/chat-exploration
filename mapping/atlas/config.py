@@ -226,6 +226,9 @@ LAYOUT = {
         "summaries/topk_index.parquet",
         "summaries/materialized_cluster_views.parquet",
         "summaries/baseline_comparisons.parquet",
+        "summaries/activation_quality.parquet",
+        "summaries/graph_quality.parquet",
+        "summaries/extraction_warnings.parquet",
     ],
     "indexes": [
         "indexes/atlas.duckdb",

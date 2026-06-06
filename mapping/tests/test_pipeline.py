@@ -21,7 +21,8 @@ STAGE_SEQUENCE = [
     "init", "scan-tensors", "build-units", "static-analysis",
     "build-static-graph", "build-calibration", "capture-activations",
     "run-probes", "build-graphs", "cluster", "score-clusters",
-    "plan-interventions", "run-interventions", "export-summaries", "build-indexes",
+    "plan-interventions", "run-interventions", "export-summaries",
+    "quality-report", "build-indexes",
 ]
 
 

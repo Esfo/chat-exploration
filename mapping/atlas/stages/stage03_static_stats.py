@@ -80,7 +80,7 @@ def run(library: Library, backend: ModelBackend, layer_workers: int = 0, **kwarg
     #Each layer transiently holds ~1-2 GB of float64 work arrays, so cap the
     #concurrency to bound memory. Override with ATLAS_STATIC_WORKERS if you have
     #headroom and want more cores busy.
-    cap = int(os.environ.get("ATLAS_STATIC_WORKERS", "10"))
+    cap = int(os.environ.get("ATLAS_STATIC_WORKERS", "6"))
     workers = min(resolve_workers(layer_workers), cap)
     print(f"[static-analysis] {arch.num_layers} layers, ~{units_per_layer} units/layer, "
           f"{workers} layers in parallel", flush=True)
@@ -147,14 +147,23 @@ def _row_norm(m):
     return np.sqrt((m.astype(np.float64) ** 2).sum(axis=1))
 
 
-def _row_moments(m):
-    m = m.astype(np.float64)
-    mean = m.mean(axis=1)
-    centered = m - mean[:, None]
-    var = (centered ** 2).mean(axis=1)
-    std = np.sqrt(var)
-    safe = np.where(std == 0, 1.0, std)
-    kurt = (centered ** 4).mean(axis=1) / (safe ** 4) - 3.0
+def _row_moments(m, chunk=2048):
+    """Mean/std/kurtosis per row, computed in row-chunks so we never hold a full
+    float64 centered/^4 copy of a big weight tensor in memory (Issue 8)."""
+    n = m.shape[0]
+    mean = np.empty(n, np.float64)
+    std = np.empty(n, np.float64)
+    kurt = np.empty(n, np.float64)
+    for i in range(0, n, chunk):
+        block = m[i:i + chunk].astype(np.float64)
+        bm = block.mean(axis=1)
+        centered = block - bm[:, None]
+        var = (centered ** 2).mean(axis=1)
+        s = np.sqrt(var)
+        safe = np.where(s == 0, 1.0, s)
+        mean[i:i + chunk] = bm
+        std[i:i + chunk] = s
+        kurt[i:i + chunk] = (centered ** 4).mean(axis=1) / (safe ** 4) - 3.0
     return mean, std, kurt
 
 
