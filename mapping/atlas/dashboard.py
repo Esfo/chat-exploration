@@ -62,11 +62,20 @@ def _tables(library_dir: str) -> set[str]:
     return {r[0] for r in rows}
 
 
-def _sql(library_dir: str, query: str, params: list | None = None) -> pd.DataFrame:
-    """Run a query, returning an empty frame instead of raising on missing data."""
+@st.cache_data(show_spinner=False)
+def _sql_cached(library_dir: str, query: str, params: tuple) -> pd.DataFrame:
     _, con = _connect(library_dir)
+    return con.execute(query, list(params)).df()
+
+
+def _sql(library_dir: str, query: str, params: list | None = None) -> pd.DataFrame:
+    """Run a query, returning an empty frame instead of raising on missing data.
+
+    Results are cached per (library, query, params) so flipping between pages and
+    nudging widgets doesn't re-scan DuckDB every rerun.
+    """
     try:
-        return con.execute(query, params or []).df()
+        return _sql_cached(library_dir, query, tuple(params or []))
     except Exception as e:  # noqa: BLE001 — surface as an empty result in the UI
         st.warning(f"Query failed: {e}")
         return pd.DataFrame()
@@ -1239,11 +1248,23 @@ def page_cluster_landscape(lib: str, tables: set[str]):
             if "cluster_quality" in tables else pd.DataFrame()
         if not emb.empty and not meta.empty:
             method = emb["embedding_method"].iloc[0] if "embedding_method" in emb else "?"
-            st.caption(f"Embedding method: **{method}** "
-                       f"(install umap-learn for a UMAP map).")
             df = emb.merge(meta, on="cluster_id", how="left")
-            hulls = _sql(lib, "SELECT * FROM cluster_family_hulls ORDER BY family_cluster_id, "
-                              "vertex_order") if "cluster_family_hulls" in tables else pd.DataFrame()
+            #Drop clusters with no embedding signal (no centroid + average features)
+            #that otherwise pile into a fake dense dot at the origin.
+            df = df[(df["x"].abs() > 1e-6) | (df["y"].abs() > 1e-6)]
+            note = ("" if method == "umap"
+                    else "  ·  PCA tends to blob; `pip install umap-learn` for real "
+                         "separation, then re-run extraction.")
+            st.caption(f"Embedding method: **{method}**{note}")
+            show_hulls = st.checkbox("Overlay family hulls (usually cluttered with PCA)",
+                                     value=False)
+            hulls = _sql(lib, "SELECT * FROM cluster_family_hulls ORDER BY "
+                              "family_cluster_id, vertex_order") \
+                if (show_hulls and "cluster_family_hulls" in tables) else pd.DataFrame()
+            #Cap rendered points so the browser stays responsive.
+            if len(df) > 8000:
+                df = df.sample(8000, random_state=0)
+                st.caption(f"Showing 8,000 of {len(emb):,} clusters (sampled).")
             _embedding_map(df, "dominant_layer", "2D cluster behavior map (color = layer)", hulls)
             _embedding_map(df, "source_score", "Role gradient (color = source score)", hulls)
             return
