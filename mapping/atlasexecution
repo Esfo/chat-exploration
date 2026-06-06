@@ -34,6 +34,17 @@ BATCH_SIZE="${BATCH_SIZE:-8}"
 #(0 = all). Capping does not reduce forward-pass time, only the accumulation work.
 MAX_MLP_NEURONS_PER_LAYER="${MAX_MLP_NEURONS_PER_LAYER:-0}"
 
+#Capture device. 'auto' uses the GPU when one is visible, else CPU. The heavy
+#stage is the capture forward pass; running it on a GPU is the only >10x speedup.
+#LOAD_IN_4BIT=1 (nf4) shrinks an 8B model to a few GB of VRAM so it fits on small
+#cards (e.g. an RTX 4050). Only capture uses the GPU — weight analysis stays on CPU.
+DEVICE="${DEVICE:-auto}"
+LOAD_IN_4BIT="${LOAD_IN_4BIT:-1}"
+FOURBIT_FLAG=""
+if [ "$LOAD_IN_4BIT" = "1" ]; then
+  FOURBIT_FLAG="--load-in-4bit"
+fi
+
 #Set DEQUANTIZE_F16=1 to pre-dequantize the GGUF to F16 with llama-quantize
 #(fallback if transformers can't read the source quant type directly).
 DEQUANTIZE_F16="${DEQUANTIZE_F16:-0}"
@@ -59,6 +70,8 @@ python3 -m atlas.cli --out "$LIBRARY_DIR" --threads "$THREADS" init \
   --model "$SOURCE_MODEL" \
   --tokens "$TARGET_TOKENS" \
   --max-mlp-neurons-per-layer "$MAX_MLP_NEURONS_PER_LAYER" \
+  --device "$DEVICE" \
+  $FOURBIT_FLAG \
   $DEQUANT_FLAG
 
 python3 -m atlas.cli --out "$LIBRARY_DIR" --threads "$THREADS" run-all \

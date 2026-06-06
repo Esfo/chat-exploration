@@ -52,6 +52,10 @@ class ExtractionConfig:
     backend: str = "hf"  # PyTorch backend (loads HF dirs or GGUF transparently)
     dtype: str = "bfloat16"
     device: str = "auto"
+    #4-bit (nf4) quantize the model when capturing on a GPU, so an 8B checkpoint
+    #fits in a few GB of VRAM. Only affects the capture forward pass; the CPU
+    #weight-analysis stages always read full-precision weights.
+    load_in_4bit: bool = False
     #If the source quant can't be read in memory, dequantize to F16 GGUF first
     #with llama-quantize (the same step /rescaling uses), then load that.
     dequantize_f16: bool = False

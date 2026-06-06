@@ -32,6 +32,7 @@ def _backend_from_config(cfg) -> ModelBackend:
     return ModelBackend(
         cfg.model_path, cfg.tokenizer_path, cfg.dtype, cfg.device,
         dequantize_f16=cfg.dequantize_f16, llama_quantize=cfg.llama_quantize,
+        load_in_4bit=getattr(cfg, "load_in_4bit", False),
     )
 
 
@@ -80,6 +81,8 @@ def _config_from_init_args(args) -> ExtractionConfig:
         cfg.dequantize_f16 = True
     if getattr(args, "llama_quantize", None):
         cfg.llama_quantize = args.llama_quantize
+    if getattr(args, "load_in_4bit", False):
+        cfg.load_in_4bit = True
     return cfg
 
 
@@ -132,7 +135,11 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--model", default=ExtractionConfig().model_path)
     init.add_argument("--tokenizer", default=None)
     init.add_argument("--dtype", default=None)
-    init.add_argument("--device", default=None)
+    init.add_argument("--device", default=None,
+                      help="cpu | cuda | auto (default auto: GPU if available)")
+    init.add_argument("--load-in-4bit", dest="load_in_4bit", action="store_true",
+                      help="4-bit (nf4) quantize the model for GPU capture so an "
+                           "8B checkpoint fits in a few GB of VRAM")
     init.add_argument("--tokens", type=int, default=None)
     init.add_argument("--dequantize-f16", dest="dequantize_f16", action="store_true",
                       help="dequantize the source GGUF to F16 via llama-quantize "

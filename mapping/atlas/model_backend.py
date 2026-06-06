@@ -64,7 +64,7 @@ class ModelBackend:
     def __init__(self, model_path: str, tokenizer_path: str | None = None,
                  dtype: str = "bfloat16", device: str = "auto",
                  dequantize_f16: bool = False, llama_quantize: str = "llama-quantize",
-                 build_dir: str | None = None):
+                 build_dir: str | None = None, load_in_4bit: bool = False):
         self.model_path = model_path
         self.tokenizer_path = tokenizer_path or model_path
         self.dtype = dtype
@@ -72,11 +72,23 @@ class ModelBackend:
         self.dequantize_f16 = dequantize_f16
         self.llama_quantize = llama_quantize
         self.build_dir = build_dir
+        self.load_in_4bit = load_in_4bit
         self._model = None
+        self._capture_model = None  # separate GPU model used only for capture
         self._tokenizer = None
         self._config = None
         self._sd = None  # cached state dict
         self._gguf = None  # resolved GGUFSource, or False if this is a HF dir
+
+    def _resolve_device(self) -> str:
+        """Map device='auto' to the best available device."""
+        if self.device and self.device != "auto":
+            return self.device
+        try:
+            import torch
+            return "cuda" if torch.cuda.is_available() else "cpu"
+        except Exception:  # noqa: BLE001 — torch absent during pure-CPU tests
+            return "cpu"
 
     #--- GGUF resolution --------------------------------------------------
     def _gguf_source(self):
@@ -109,14 +121,23 @@ class ModelBackend:
 
     #--- loading ----------------------------------------------------------
     def load_config_only(self):
-        """Read the model config. For GGUF sources this loads the full model
-        (the config is embedded in the GGUF), which is needed at init anyway."""
+        """Read the model config without materializing the full model when we can.
+
+        For GGUF sources the config is embedded in the blob, but once we've cached
+        a materialized HF checkpoint we can read its config.json directly — this
+        keeps a GPU capture-only rerun from loading the 32 GB CPU model just to
+        learn the architecture."""
         if self._config is not None:
             return self._config
-        if self._gguf_source() is not None:
-            self.load()
-            return self._config
         from transformers import AutoConfig
+        src = self._gguf_source()
+        if src is not None:
+            cache_dir = self._hf_cache_dir(src)
+            if (cache_dir / "config.json").exists():
+                self._config = AutoConfig.from_pretrained(str(cache_dir))
+                return self._config
+            self.load()  # no cache yet — the GGUF must be materialized once
+            return self._config
         self._config = AutoConfig.from_pretrained(self.model_path)
         return self._config
 
@@ -157,10 +178,10 @@ class ModelBackend:
             output_hidden_states=False, **gguf_kwargs,
         )
         self._model.eval()
-        if self.device == "cuda":
-            import torch as _t
-            if _t.cuda.is_available():
-                self._model.to("cuda")
+        #The analysis model stays on CPU: it exists only to read full-precision
+        #weights (scan-tensors/static). GPU capture uses a separate, quantized
+        #model via _capture_backend_model(), so never move this 8B fp32 copy to a
+        #small GPU here — it would OOM.
 
         tok_dir = str(cache_dir) if cached else (src.directory if src else self.tokenizer_path)
         tok_kwargs = {} if cached else gguf_kwargs
@@ -236,6 +257,76 @@ class ModelBackend:
             raise KeyError(name)
         return sd[name].to("cpu").float().numpy()
 
+    #--- capture model (optionally GPU / 4-bit) ---------------------------
+    def _capture_backend_model(self):
+        """Return the model used for forward-pass capture.
+
+        On CPU this is just the analysis model. When CUDA is available (or forced
+        via device='cuda') we load a *separate* model onto the GPU, optionally
+        4-bit quantized so an 8B checkpoint fits in a few GB of VRAM. It is loaded
+        from the materialized HF cache when present (fast, no re-dequant), leaving
+        the CPU analysis path and its raw-weight reads untouched.
+        """
+        if self._capture_model is not None:
+            return self._capture_model
+
+        dev = self._resolve_device()
+        if dev != "cuda":
+            self.load()
+            self._capture_model = self._model
+            return self._capture_model
+
+        import torch
+        from transformers import AutoModelForCausalLM
+
+        src = self._gguf_source()
+        cache_dir = self._hf_cache_dir(src) if src else None
+        cached = bool(cache_dir and (cache_dir / "config.json").exists())
+        if src is None:
+            load_dir, gguf_kwargs = self.model_path, {}
+        elif cached:
+            load_dir, gguf_kwargs = str(cache_dir), {}
+        else:
+            #No cache yet: materialize once on CPU so later GPU loads are cheap.
+            self.load()
+            load_dir, gguf_kwargs = str(cache_dir), {}
+
+        kwargs: dict[str, Any] = dict(low_cpu_mem_usage=True,
+                                      output_hidden_states=False, **gguf_kwargs)
+        if self.load_in_4bit:
+            try:
+                from transformers import BitsAndBytesConfig
+                import bitsandbytes  # noqa: F401 — ensure the kernel lib is present
+            except ImportError as e:  # noqa: BLE001
+                raise RuntimeError(
+                    "load_in_4bit requires the 'bitsandbytes' package "
+                    "(pip install bitsandbytes). It is needed to fit an 8B model "
+                    "on a small GPU.") from e
+            kwargs["quantization_config"] = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_use_double_quant=True,
+                bnb_4bit_compute_dtype=torch.float16,
+            )
+            kwargs["device_map"] = {"": 0}
+        else:
+            kwargs["torch_dtype"] = torch.float16
+
+        print(f"[capture] loading model on GPU "
+              f"({'4-bit nf4' if self.load_in_4bit else 'fp16'})…", flush=True)
+        model = AutoModelForCausalLM.from_pretrained(load_dir, **kwargs)
+        model.eval()
+        if not self.load_in_4bit:
+            model.to("cuda")
+        self._capture_model = model
+        try:
+            import torch as _t
+            vram = _t.cuda.memory_allocated() / 1e9
+            print(f"[capture] GPU model ready ({vram:.1f} GB VRAM in use)", flush=True)
+        except Exception:  # noqa: BLE001
+            pass
+        return self._capture_model
+
     #--- activation capture ----------------------------------------------
     def capture(self, input_ids, attention_mask, layer_callback: Callable):
         """Run a forward pass, invoking ``layer_callback`` with captured tensors.
@@ -252,16 +343,16 @@ class ModelBackend:
         """
         import torch
 
-        self.load()
+        model = self._capture_backend_model()
         arch = self.architecture()
-        layers = self._decoder_layers()
+        layers = self._decoder_layers(model)
         captured: dict[int, dict[str, Any]] = {}
         handles = []
 
         input_ids = torch.as_tensor(input_ids)
         attention_mask = torch.as_tensor(attention_mask)
         try:
-            dev = next(self._model.parameters()).device
+            dev = next(model.parameters()).device
             input_ids = input_ids.to(dev)
             attention_mask = attention_mask.to(dev)
         except StopIteration:
@@ -290,7 +381,7 @@ class ModelBackend:
 
         try:
             with torch.no_grad():
-                self._model(input_ids=input_ids, attention_mask=attention_mask)
+                model(input_ids=input_ids, attention_mask=attention_mask)
         finally:
             for h in handles:
                 h.remove()
@@ -299,9 +390,9 @@ class ModelBackend:
             if idx in captured:
                 layer_callback(idx, captured[idx])
 
-    def _decoder_layers(self):
+    def _decoder_layers(self, model=None):
         #Llama: model.model.layers ; fall back to common attribute paths.
-        m = self._model
+        m = model if model is not None else self._model
         for path in ("model.layers", "transformer.h", "gpt_neox.layers"):
             obj = m
             try:
