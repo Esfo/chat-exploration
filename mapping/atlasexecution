@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+#End-to-end MIBL extraction driver, mirroring the style of
+#/rescaling/scalingexecution. It references the same model family and the same
+#data root (/home/sfo/data/models) used there; activation capture needs an
+#HF-format checkpoint, so SOURCE_MODEL points at the HF weights rather than the
+#Ollama GGUF that /rescaling scales.
+
+#--- configuration ---------------------------------------------------------
+DATA_ROOT="${ATLAS_DATA_ROOT:-$HOME/data/models}"
+
+#Same model /rescaling uses: the Ollama-provided GGUF, resolved via
+#`ollama show --modelfile`. transformers loads the GGUF directly and
+#dequantizes it in memory for forward hooks (no Hugging Face download).
+SOURCE_MODEL="${SOURCE_MODEL:-llama3:8b}"
+
+#Output library location (mirrors the /rescaling output-under-data convention).
+LIBRARY_DIR="$DATA_ROOT/atlas_library"
+
+#NOTE ON TIME: activation capture runs the full model over every token. On CPU
+#for an 8B model this is the dominant cost and scales linearly with TARGET_TOKENS
+#— 500k tokens can take many hours. The default below is a tractable first pass;
+#raise it once you've confirmed an end-to-end run completes. A GPU that fits the
+#model is the only way to make large token budgets fast.
+TARGET_TOKENS="${TARGET_TOKENS:-50000}"
+#Capture batch size. On CPU a larger batch gives BLAS bigger matmuls and spends
+#proportionally less time in the single-threaded between-batch accumulation, so
+#cores stay busier — raise it if you have memory headroom. It does not reduce
+#total forward-pass FLOPs (that scales with tokens), only overhead/utilization.
+BATCH_SIZE="${BATCH_SIZE:-8}"
+
+#Cap MLP neurons per layer to bound capture's per-batch CPU overhead and memory
+#(0 = all). Capping does not reduce forward-pass time, only the accumulation work.
+MAX_MLP_NEURONS_PER_LAYER="${MAX_MLP_NEURONS_PER_LAYER:-0}"
+
+#Capture device. 'auto' uses the GPU when one is visible, else CPU. The heavy
+#stage is the capture forward pass; running it on a GPU is the big speedup.
+#
+#The GPU path streams weights one layer at a time (accelerate cpu_offload), so an
+#8B model runs on a small card (e.g. a 6 GB RTX 4050) at full fp16 precision with
+#only one layer resident at a time — no quantization, no bitsandbytes needed. If
+#the GPU load fails for any reason, capture falls back to CPU automatically.
+#Only capture uses the GPU; weight analysis always stays on CPU.
+DEVICE="${DEVICE:-auto}"
+
+#Reduce CUDA fragmentation for tight-fitting activations.
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+
+#The model is already local, so keep the HuggingFace loader fully offline — no
+#hub metadata checks or shard re-downloads (which show up as outbound network).
+#Set HF_HUB_OFFLINE=0 before running if you ever need to fetch a model.
+export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
+export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-1}"
+export HF_HUB_DISABLE_TELEMETRY="${HF_HUB_DISABLE_TELEMETRY:-1}"
+
+#Set DEQUANTIZE_F16=1 to pre-dequantize the GGUF to F16 with llama-quantize
+#(fallback if transformers can't read the source quant type directly).
+DEQUANTIZE_F16="${DEQUANTIZE_F16:-0}"
+DEQUANT_FLAG=""
+if [ "$DEQUANTIZE_F16" = "1" ]; then
+  DEQUANT_FLAG="--dequantize-f16"
+fi
+
+#Thread count for torch + BLAS. Exporting before Python starts is the reliable
+#way to make NumPy's BLAS use every core. Defaults to all cores.
+THREADS="${THREADS:-$(nproc 2>/dev/null || echo 1)}"
+export OMP_NUM_THREADS="$THREADS"
+export MKL_NUM_THREADS="$THREADS"
+export OPENBLAS_NUM_THREADS="$THREADS"
+export NUMEXPR_NUM_THREADS="$THREADS"
+export VECLIB_MAXIMUM_THREADS="$THREADS"
+
+#--- run -------------------------------------------------------------------
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+cd "$SCRIPT_DIR"
+
+python3 -m atlas.cli --out "$LIBRARY_DIR" --threads "$THREADS" init \
+  --model "$SOURCE_MODEL" \
+  --tokens "$TARGET_TOKENS" \
+  --max-mlp-neurons-per-layer "$MAX_MLP_NEURONS_PER_LAYER" \
+  --device "$DEVICE" \
+  $DEQUANT_FLAG
+
+python3 -m atlas.cli --out "$LIBRARY_DIR" --threads "$THREADS" run-all \
+  --batch-size "$BATCH_SIZE" "$@"
+
+echo
+echo "Library written to: $LIBRARY_DIR"
+echo "Query it with DuckDB:"
+echo "  duckdb $LIBRARY_DIR/indexes/atlas.duckdb"

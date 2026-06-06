@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+#Launch the Atlas Explorer (Streamlit) over a built library.
+#Usage:
+#   ./atlasdashboard                       # uses the default library location
+#   ./atlasdashboard /path/to/atlas_library
+#   ATLAS_LIBRARY_DIR=/path ./atlasdashboard
+#
+#Streamlit may live as a standalone `streamlit` binary (e.g. Arch's
+#python-streamlit) or only as a module under some Python. Try, in order: the
+#`streamlit` executable, then `python3 -m streamlit`, then `python -m streamlit`.
+
+DATA_ROOT="${ATLAS_DATA_ROOT:-$HOME/data/models}"
+LIBRARY_DIR="${1:-${ATLAS_LIBRARY_DIR:-$DATA_ROOT/atlas_library}}"
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+cd "$SCRIPT_DIR"
+
+run() { exec "$@" run atlas/dashboard.py -- --library "$LIBRARY_DIR"; }
+
+#The dashboard needs streamlit AND the atlas deps (duckdb/pyarrow/zarr) in the
+#SAME interpreter. Prefer the Python that can import the atlas stack; only use a
+#standalone `streamlit` binary if it can also import those deps.
+has() { "$@" -c "import streamlit, duckdb, pyarrow" >/dev/null 2>&1; }
+
+if has python3; then
+  run python3 -m streamlit
+elif command -v python >/dev/null 2>&1 && has python; then
+  run python -m streamlit
+elif command -v streamlit >/dev/null 2>&1; then
+  #A streamlit binary exists but our `import` probe failed. On a single-Python
+  #system the binary still has the atlas deps, so just run it — the binary is the
+  #source of truth, not our probe (which also fails on import *errors*, not only
+  #genuinely missing packages).
+  run streamlit
+fi
+
+echo "Could not launch Streamlit. Showing the real import results below"
+echo "(an import that ERRORS is reported the same as one that's missing, so check"
+echo "the tracebacks rather than assuming a package is absent)."
+echo
+echo "  python3 -> $(command -v python3 || echo n/a)"
+echo "  streamlit binary -> $(command -v streamlit || echo n/a)"
+for mod in streamlit duckdb pyarrow zarr; do
+  echo "  --- python3 -c 'import $mod' ---"
+  python3 -c "import $mod" 2>&1 | sed 's/^/    /' || true
+done
+exit 1
