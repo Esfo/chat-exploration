@@ -28,26 +28,22 @@ if has python3; then
   run python3 -m streamlit
 elif command -v python >/dev/null 2>&1 && has python; then
   run python -m streamlit
+elif command -v streamlit >/dev/null 2>&1; then
+  #A streamlit binary exists but our `import` probe failed. On a single-Python
+  #system the binary still has the atlas deps, so just run it — the binary is the
+  #source of truth, not our probe (which also fails on import *errors*, not only
+  #genuinely missing packages).
+  run streamlit
 fi
 
-echo "Streamlit + the atlas deps are not both importable from one interpreter."
+echo "Could not launch Streamlit. Showing the real import results below"
+echo "(an import that ERRORS is reported the same as one that's missing, so check"
+echo "the tracebacks rather than assuming a package is absent)."
 echo
-echo "You have streamlit (via pacman) in one Python and the atlas deps"
-echo "(duckdb/pyarrow/zarr) in another. Install streamlit into the SAME Python"
-echo "you ran the pipeline with:"
-echo
-echo "    python3 -m pip install streamlit"
-echo
-echo "(use the exact 'python3' below — the one with the atlas deps), then re-run."
-echo
-echo "Diagnostics:"
 echo "  python3 -> $(command -v python3 || echo n/a)"
-for mod in streamlit duckdb pyarrow zarr; do
-  if python3 -c "import $mod" >/dev/null 2>&1; then
-    echo "  python3 import $mod: OK"
-  else
-    echo "  python3 import $mod: MISSING"
-  fi
-done
 echo "  streamlit binary -> $(command -v streamlit || echo n/a)"
+for mod in streamlit duckdb pyarrow zarr; do
+  echo "  --- python3 -c 'import $mod' ---"
+  python3 -c "import $mod" 2>&1 | sed 's/^/    /' || true
+done
 exit 1
