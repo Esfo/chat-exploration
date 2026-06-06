@@ -112,20 +112,40 @@ def _run_all(args) -> None:
     if from_stage and from_stage not in names:
         sys.exit(f"Unknown --from stage {from_stage!r}. Choices: {', '.join(names)}")
     force_from_idx = names.index(from_stage) if from_stage else len(names)
+
+    def _mtime(rel):
+        """Newest mtime under an artifact path (file, or any file in a dir)."""
+        p = library.path(rel)
+        if not p.exists():
+            return None
+        if p.is_file():
+            return p.stat().st_mtime
+        return max((f.stat().st_mtime for f in p.rglob("*") if f.is_file()),
+                   default=p.stat().st_mtime)
+
+    cascade = False  # once a stage reruns, everything downstream must too
     for i, stage in enumerate(v1):
-        #Resume by default: skip a stage whose outputs already exist (they are
-        #committed atomically, so existence means the stage completed). Use
-        #--force to rerun everything, or --from to rerun a suffix.
-        force = getattr(args, "force", False) or i >= force_from_idx
+        #Resume by default, but rerun automatically when a stage is stale: outputs
+        #missing, an input newer than the outputs (an upstream stage was rerun), or
+        #an earlier stage already reran this pass. --force/--from override.
         produced = stage.produces and all(library.path(p).exists() for p in stage.produces)
+        out_m = min([m for p in (stage.produces or [])
+                     if (m := _mtime(p)) is not None], default=None)
+        in_m = max([m for r in stage.requires
+                    if (m := _mtime(r)) is not None], default=None)
+        stale = (out_m is not None and in_m is not None and in_m > out_m)
+        force = getattr(args, "force", False) or i >= force_from_idx or cascade or stale
         if produced and not force:
-            print(f"=== skipping {stage.name} (already done; --force to rerun) ===",
-                  flush=True)
+            print(f"=== skipping {stage.name} (up to date) ===", flush=True)
             continue
-        print(f"=== running {stage.name} ===", flush=True)
+        reason = ("forced" if (getattr(args, "force", False) or i >= force_from_idx)
+                  else "stale inputs" if stale else "upstream reran" if cascade
+                  else "missing outputs")
+        print(f"=== running {stage.name} ({reason}) ===", flush=True)
         t0 = time.time()
         _run_stage(stage.name, args)
         print(f"=== {stage.name} done in {(time.time()-t0)/60:.1f}m ===", flush=True)
+        cascade = True
 
 
 def build_parser() -> argparse.ArgumentParser:
