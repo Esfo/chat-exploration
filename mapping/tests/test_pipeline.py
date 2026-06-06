@@ -22,7 +22,7 @@ STAGE_SEQUENCE = [
     "build-static-graph", "build-calibration", "capture-activations",
     "run-probes", "build-graphs", "cluster", "score-clusters",
     "plan-interventions", "run-interventions", "export-summaries",
-    "quality-report", "build-indexes",
+    "quality-report", "export-dashboard-summaries", "build-indexes",
 ]
 
 

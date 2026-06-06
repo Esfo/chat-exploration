@@ -237,6 +237,11 @@ LAYOUT = {
         "summaries/activation_quality.parquet",
         "summaries/graph_quality.parquet",
         "summaries/extraction_warnings.parquet",
+        "summaries/library_health.parquet",
+        "summaries/layer_summary.parquet",
+        "summaries/cluster_quality.parquet",
+        "summaries/layer_flow_matrix.parquet",
+        "summaries/evidence_profiles.parquet",
     ],
     "indexes": [
         "indexes/atlas.duckdb",
