@@ -665,7 +665,28 @@ def _datasets(tables: set[str]) -> dict[str, str]:
         ds["edges — combined graph"] = "SELECT * FROM unit_edges_combined"
     if "tensor_stats" in tables:
         ds["tensors — weight statistics"] = "SELECT * FROM tensor_stats"
+    #Curated fast summary datasets (Stage H): prefer these over raw scans. Marked
+    #with ✓ so the studio can recommend them instead of large raw tables.
+    curated = {
+        "✓ summary: cluster_quality": "cluster_quality",
+        "✓ summary: layer_summary": "layer_summary",
+        "✓ summary: evidence_profiles (sampled)": "evidence_profiles",
+        "✓ summary: layer_flow_matrix": "layer_flow_matrix",
+        "✓ summary: cluster_embedding_2d": "cluster_embedding_2d",
+        "✓ summary: cluster_member_view": "cluster_member_view",
+        "✓ summary: activation_quality": "activation_quality",
+    }
+    for label, view in curated.items():
+        if view in tables:
+            ds[label] = f"SELECT * FROM {view}"
     return ds
+
+
+#Raw tables that are large; the studio warns and recommends a summary instead.
+_LARGE_RAW = {"unit_edges_combined", "unit_edges_activation", "unit_edges_lagged",
+              "activation_top_events", "cluster_member_view"}
+_SUMMARY_FOR = {"unit_edges_combined": "✓ summary: evidence_profiles (sampled)",
+                "unit_edges_activation": "✓ summary: layer_flow_matrix"}
 
 
 _NUMERIC_HINTS = ("INT", "FLOAT", "DOUBLE", "DECIMAL", "REAL", "HUGEINT")
@@ -697,6 +718,14 @@ def page_plotlab(lib: str, tables: set[str]):
     options = list(datasets) + [f"raw: {t}" for t in sorted(tables)]
     choice = st.selectbox("Dataset", options)
     base_sql = datasets[choice] if choice in datasets else f"SELECT * FROM {choice[5:]}"
+    #Stage I: warn when the user picks a large raw table and point to a summary.
+    if choice.startswith("raw: "):
+        raw = choice[5:]
+        if raw in _LARGE_RAW:
+            rec = _SUMMARY_FOR.get(raw)
+            st.warning(f"`{raw}` is a large raw table — page loads may be slow and "
+                       f"results are row-limited."
+                       + (f" Consider **{rec}** instead." if rec else ""))
     st.caption("Tip: to histogram per-unit values (e.g. weights) within clusters, "
                "pick **units — …** (one row per unit). The **clusters** dataset has "
                "only one row per cluster, so it can't form a distribution.")
@@ -729,7 +758,8 @@ def page_plotlab(lib: str, tables: set[str]):
 
     #--- chart spec -----------------------------------------------------
     chart_type = st.selectbox(
-        "Chart type", ["Histogram", "Scatter", "Bar", "Line", "Box", "Heatmap", "Table"])
+        "Chart type", ["Histogram", "Scatter", "Density (2D bins)", "Bar", "Line",
+                       "Box", "Heatmap", "Table"])
 
     #Histogram manages its own (full, per-group) querying — see _histogram.
     if chart_type == "Histogram":
@@ -762,6 +792,9 @@ def page_plotlab(lib: str, tables: set[str]):
             enc["y"] = c2.selectbox("Y", numeric_cols or all_cols)
             enc["color"] = c3.selectbox("Color", [none] + all_cols)
             enc["size"] = c4.selectbox("Size", [none] + numeric_cols)
+        elif chart_type == "Density (2D bins)":
+            enc["x"] = c1.selectbox("X", numeric_cols or all_cols)
+            enc["y"] = c2.selectbox("Y", numeric_cols or all_cols)
         elif chart_type in ("Bar", "Line"):
             enc["x"] = c1.selectbox("X (category/axis)", all_cols)
             enc["agg"] = c2.selectbox("Aggregate",
@@ -978,6 +1011,15 @@ def _build_chart(df, chart_type, enc, none):
                 e["size"] = alt.Size(enc["size"] + ":Q")
             return alt.Chart(df).mark_circle(opacity=0.6).encode(**e) \
                 .interactive().properties(height=420)
+
+        if chart_type == "Density (2D bins)":
+            #Binned 2D count grid — readable where a scatter would be an
+            #unreadable point cloud (the plan's density-contour substitute).
+            return alt.Chart(df).mark_rect().encode(
+                x=alt.X(enc["x"], bin=alt.Bin(maxbins=60), type="quantitative"),
+                y=alt.Y(enc["y"], bin=alt.Bin(maxbins=60), type="quantitative"),
+                color=alt.Color("count()", title="count",
+                                scale=alt.Scale(scheme="magma"))).properties(height=420)
 
         if chart_type in ("Bar", "Line"):
             agg = enc["agg"]
