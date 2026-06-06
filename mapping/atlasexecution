@@ -45,6 +45,22 @@ if [ "$LOAD_IN_4BIT" = "1" ]; then
   FOURBIT_FLAG="--load-in-4bit"
 fi
 
+#Reduce CUDA fragmentation so a tight-fitting model is less likely to OOM.
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+
+#bitsandbytes ships prebuilt kernels per CUDA version. If your installed CUDA
+#(e.g. 13.2) has no matching binary, point bnb at the closest available one:
+#   BNB_CUDA_VERSION=133 ./atlasexecution
+#Capture will otherwise auto-fall back to CPU if the GPU/quant load fails.
+if [ -n "${BNB_CUDA_VERSION:-}" ]; then
+  export BNB_CUDA_VERSION
+fi
+
+#NOTE: an 8B model does not fully fit in a 6 GB GPU even at 4-bit; capture will
+#offload overflow layers to CPU automatically. For a fully-on-GPU (much faster)
+#run on a small card, capture a smaller model via SOURCE_MODEL, e.g.
+#   SOURCE_MODEL=llama3.2:3b ./atlasexecution
+
 #Set DEQUANTIZE_F16=1 to pre-dequantize the GGUF to F16 with llama-quantize
 #(fallback if transformers can't read the source quant type directly).
 DEQUANTIZE_F16="${DEQUANTIZE_F16:-0}"

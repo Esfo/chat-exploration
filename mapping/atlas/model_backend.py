@@ -276,6 +276,27 @@ class ModelBackend:
             self._capture_model = self._model
             return self._capture_model
 
+        try:
+            self._capture_model = self._load_gpu_model()
+        except Exception as e:  # noqa: BLE001 — any GPU/quant failure must not crash
+            print(f"[capture] GPU load failed ({type(e).__name__}: {e}).\n"
+                  f"[capture] Falling back to CPU. To use the GPU, ensure the model "
+                  f"fits in VRAM (an 8B model needs a working 4-bit bitsandbytes and "
+                  f"~6 GB free) or capture a smaller model. See README notes.",
+                  flush=True)
+            self.load()
+            self._capture_model = self._model
+        return self._capture_model
+
+    def _load_gpu_model(self):
+        """Load the capture model on GPU, offloading overflow layers to CPU.
+
+        Uses device_map='auto' with a VRAM cap so transformers places as many
+        layers on the GPU as fit and runs the rest on CPU — this avoids OOM on
+        small cards (an 8B model does not fully fit in 6 GB even at 4-bit). Raises
+        on any failure so the caller can fall back to pure CPU.
+        """
+        import os
         import torch
         from transformers import AutoModelForCausalLM
 
@@ -291,41 +312,36 @@ class ModelBackend:
             self.load()
             load_dir, gguf_kwargs = str(cache_dir), {}
 
-        kwargs: dict[str, Any] = dict(low_cpu_mem_usage=True,
-                                      output_hidden_states=False, **gguf_kwargs)
+        #Cap GPU memory so overflow spills to CPU instead of OOMing. Leave a margin
+        #below the card's true capacity for activations and other processes.
+        free_gib = torch.cuda.mem_get_info()[0] / 1024**3
+        gpu_cap = os.environ.get("ATLAS_GPU_MAX_MEM") or f"{max(free_gib - 1.0, 1.0):.1f}GiB"
+        max_memory = {0: gpu_cap, "cpu": os.environ.get("ATLAS_CPU_MAX_MEM", "64GiB")}
+
+        kwargs: dict[str, Any] = dict(low_cpu_mem_usage=True, output_hidden_states=False,
+                                      device_map="auto", max_memory=max_memory, **gguf_kwargs)
         if self.load_in_4bit:
-            try:
-                from transformers import BitsAndBytesConfig
-                import bitsandbytes  # noqa: F401 — ensure the kernel lib is present
-            except ImportError as e:  # noqa: BLE001
-                raise RuntimeError(
-                    "load_in_4bit requires the 'bitsandbytes' package "
-                    "(pip install bitsandbytes). It is needed to fit an 8B model "
-                    "on a small GPU.") from e
+            from transformers import BitsAndBytesConfig
+            import bitsandbytes  # noqa: F401 — fail fast if the kernel lib is broken
             kwargs["quantization_config"] = BitsAndBytesConfig(
                 load_in_4bit=True,
                 bnb_4bit_quant_type="nf4",
                 bnb_4bit_use_double_quant=True,
                 bnb_4bit_compute_dtype=torch.float16,
+                llm_int8_enable_fp32_cpu_offload=True,  # allow CPU-offloaded layers
             )
-            kwargs["device_map"] = {"": 0}
         else:
             kwargs["torch_dtype"] = torch.float16
 
         print(f"[capture] loading model on GPU "
-              f"({'4-bit nf4' if self.load_in_4bit else 'fp16'})…", flush=True)
+              f"({'4-bit nf4' if self.load_in_4bit else 'fp16'}, "
+              f"GPU cap {gpu_cap}, overflow→CPU)…", flush=True)
         model = AutoModelForCausalLM.from_pretrained(load_dir, **kwargs)
         model.eval()
-        if not self.load_in_4bit:
-            model.to("cuda")
-        self._capture_model = model
-        try:
-            import torch as _t
-            vram = _t.cuda.memory_allocated() / 1e9
-            print(f"[capture] GPU model ready ({vram:.1f} GB VRAM in use)", flush=True)
-        except Exception:  # noqa: BLE001
-            pass
-        return self._capture_model
+        vram = torch.cuda.memory_allocated() / 1024**3
+        print(f"[capture] GPU model ready ({vram:.1f} GiB VRAM in use; "
+              f"layers beyond the cap run on CPU)", flush=True)
+        return model
 
     #--- activation capture ----------------------------------------------
     def capture(self, input_ids, attention_mask, layer_callback: Callable):
