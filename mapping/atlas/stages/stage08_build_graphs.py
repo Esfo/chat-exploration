@@ -65,11 +65,15 @@ def run(library: Library, backend: ModelBackend, layer_window: int | None = None
                 by_layer[l] = list(rng.choice(idxs, per_layer_cap, replace=False))
     included = {uids[i] for idxs in by_layer.values() for i in idxs}
 
-    activation_edges, lagged_edges, routing_edges = [], [], []
     layers = sorted(by_layer)
     chunk = max(1, config.graph_source_chunk)
     bits = bitsets["bits"] if bitsets is not None else None
     min_score = config.edge_min_score
+
+    #Position-indexed lookups so the hot loop stays in NumPy, never per-edge dicts.
+    uids_arr = np.asarray(uids, dtype=object)
+    layer_pos = np.array([layer_of[u] for u in uids], dtype=np.int32)
+    is_attn = np.array([type_of[u] == "attn_head" for u in uids], dtype=bool)
 
     total_sources = sum(len(v) for v in by_layer.values())
     print(f"[build-graphs] {total_sources} source units across {len(layers)} layers, "
@@ -77,6 +81,8 @@ def run(library: Library, backend: ModelBackend, layer_window: int | None = None
           f"{' (sampled)' if sampled else ' (full coverage)'}", flush=True)
     prog = Progress("build-graphs", total_sources, every=chunk, step_label="batch")
 
+    #Accumulate edges as columnar arrays per chunk, concatenated once at the end.
+    src_parts, tgt_parts, score_parts, act_parts = [], [], [], []
     for src_layer in layers:
         src_idx = np.array(by_layer[src_layer])
         if not len(src_idx):
@@ -91,41 +97,43 @@ def run(library: Library, backend: ModelBackend, layer_window: int | None = None
         for c0 in range(0, len(src_idx), chunk):
             cidx = src_idx[c0:c0 + chunk]
             sims = sig[cidx] @ tgt_sig.T  # cosine (signatures are unit-norm)
+            m = sims.shape[0]
             k = min(config.edges_top_k, sims.shape[1])
-            top = np.argpartition(-sims, k - 1, axis=1)[:, :k]
-            for si in range(sims.shape[0]):
-                su = uids[cidx[si]]
-                tjs = top[si]
-                sc = sims[si, tjs]
-                keep = sc >= min_score
-                tjs = tjs[keep]; sc = sc[keep]
-                if not len(tjs):
-                    continue
-                #Vectorized co-firing overlap for this source's k targets at once
-                #(popcount on packed bytes — no per-edge unpackbits).
-                if bits is not None:
-                    a = bits[cidx[si]]
-                    b = bits[tgt_idx[tjs]]
-                    inter = _POPCOUNT[a & b].sum(axis=1)
-                    union = _POPCOUNT[a | b].sum(axis=1)
-                    ov = np.where(union > 0, inter / np.maximum(union, 1), 0.0)
-                else:
-                    ov = np.zeros(len(tjs))
-                act = 0.5 * sc + 0.5 * ov
-                for r in range(len(tjs)):
-                    tu = uids[tgt_idx[tjs[r]]]
-                    if su == tu:
-                        continue
-                    tl = layer_of[tu]
-                    score = float(sc[r])
-                    activation_edges.append(_edge(su, tu, src_layer, tl, "activation_score", float(act[r])))
-                    if tl > src_layer:
-                        lagged_edges.append(_edge(su, tu, src_layer, tl, "lagged_score", score))
-                        if type_of[su] == "attn_head":
-                            routing_edges.append(_edge(su, tu, src_layer, tl, "attention_routing_score", score))
-            prog.tick(len(cidx), extra=f"L{src_layer}  {len(activation_edges):,} edges")
-    prog.done(extra=f"{len(activation_edges):,} activation edges")
-    print("[build-graphs] merging evidence into combined graph…", flush=True)
+            top = np.argpartition(-sims, k - 1, axis=1)[:, :k]  # [m, k] tgt-array idx
+            sc = np.take_along_axis(sims, top, axis=1).ravel()  # [m*k] scores
+            sp = np.repeat(cidx, k)                              # source unit positions
+            tp = tgt_idx[top].ravel()                           # target unit positions
+            #Vectorized co-firing overlap for the whole chunk at once (popcount on
+            #packed bytes — no per-edge unpackbits, no Python edge loop).
+            if bits is not None:
+                inter = _POPCOUNT[bits[sp] & bits[tp]].sum(axis=1)
+                union = _POPCOUNT[bits[sp] | bits[tp]].sum(axis=1)
+                ov = np.where(union > 0, inter / np.maximum(union, 1), 0.0)
+            else:
+                ov = np.zeros(sp.shape[0])
+            keep = (sc >= min_score) & (sp != tp)
+            sp, tp, sc, ov = sp[keep], tp[keep], sc[keep], ov[keep]
+            src_parts.append(sp); tgt_parts.append(tp)
+            score_parts.append(sc); act_parts.append(0.5 * sc + 0.5 * ov)
+            prog.tick(len(cidx), extra=f"L{src_layer}")
+    prog.done()
+
+    print("[build-graphs] assembling edge tables…", flush=True)
+    sp = np.concatenate(src_parts) if src_parts else np.empty(0, np.int64)
+    tp = np.concatenate(tgt_parts) if tgt_parts else np.empty(0, np.int64)
+    sc = np.concatenate(score_parts) if score_parts else np.empty(0, np.float64)
+    act = np.concatenate(act_parts) if act_parts else np.empty(0, np.float64)
+    sl, tl = layer_pos[sp], layer_pos[tp]
+    activation_edges = _edge_table(uids_arr, sp, tp, sl, tl, "activation_score", act)
+    lag = tl > sl
+    lagged_edges = _edge_table(uids_arr, sp[lag], tp[lag], sl[lag], tl[lag],
+                               "lagged_score", sc[lag])
+    rt = lag & is_attn[sp]
+    routing_edges = _edge_table(uids_arr, sp[rt], tp[rt], sl[rt], tl[rt],
+                                "attention_routing_score", sc[rt])
+    print(f"[build-graphs] {activation_edges.num_rows:,} activation / "
+          f"{lagged_edges.num_rows:,} lagged / {routing_edges.num_rows:,} routing edges; "
+          f"merging combined graph…", flush=True)
 
     #Coverage records so the dashboard can show graph honesty (Issue 7).
     participation = [{"unit_id": u["unit_id"], "layer_id": u["layer_id"],
@@ -150,19 +158,31 @@ def run(library: Library, backend: ModelBackend, layer_window: int | None = None
     #commit the empty contract table so downstream joins always find it.
     library.commit_table("graphs/unit_edges_probe_response.parquet", [], "graphs", "build-graphs")
 
-    combined = _combine(library, config, layer_of)
+    combined = _combine(library, config)
     library.commit_table("graphs/unit_edges_combined.parquet", combined, "graphs", "build-graphs")
 
     library.log("build-graphs", "unit graphs built",
-                activation=len(activation_edges), lagged=len(lagged_edges),
-                routing=len(routing_edges), combined=len(combined))
+                activation=activation_edges.num_rows, lagged=lagged_edges.num_rows,
+                routing=routing_edges.num_rows, combined=combined.num_rows)
     library.update_artifact_versions("build-graphs")
-    return {"activation": len(activation_edges), "combined": len(combined)}
+    return {"activation": activation_edges.num_rows, "combined": combined.num_rows}
 
 
 def _edge(su, tu, sl, tl, field, score):
     return {"source_unit_id": su, "target_unit_id": tu,
             "source_layer": sl, "target_layer": tl, field: score}
+
+
+def _edge_table(uids_arr, sp, tp, sl, tl, field, score):
+    """Build an edge table straight from columnar arrays (no per-edge dicts)."""
+    import pyarrow as pa
+    return pa.table({
+        "source_unit_id": pa.array(uids_arr[sp], type=pa.string()),
+        "target_unit_id": pa.array(uids_arr[tp], type=pa.string()),
+        "source_layer": pa.array(np.asarray(sl, np.int32)),
+        "target_layer": pa.array(np.asarray(tl, np.int32)),
+        field: pa.array(np.asarray(score, np.float64)),
+    })
 
 
 def _load_bitsets(library):
@@ -173,42 +193,56 @@ def _load_bitsets(library):
     return {"uids": read_zarr_str(g, "unit_ids"), "bits": np.asarray(g["bitset"][:])}
 
 
-def _combine(library, config, layer_of):
-    """Merge all evidence edge tables into the combined graph by (src, tgt)."""
-    files = {
-        "activation_score": "graphs/unit_edges_activation.parquet",
-        "lagged_score": "graphs/unit_edges_lagged.parquet",
-        "static_alignment_score": "graphs/unit_edges_static_alignment.parquet",
-        "attention_routing_score": "graphs/unit_edges_attention_routing.parquet",
-        "probe_response_score": "graphs/unit_edges_probe_response.parquet",
-    }
-    merged: dict[tuple, dict] = {}
-    for field, rel in files.items():
+def _combine(library, config):
+    """Merge all evidence edge tables into the combined graph by (src, tgt).
+
+    Done in DuckDB via a single grouped UNION ALL so it scales to the tens of
+    millions of edges that full graph coverage (Issue 7) produces, rather than a
+    Python dict keyed by every (source, target) pair.
+    """
+    import duckdb
+
+    specs = [
+        ("activation", "graphs/unit_edges_activation.parquet", "activation_score"),
+        ("lagged", "graphs/unit_edges_lagged.parquet", "lagged_score"),
+        ("static_alignment", "graphs/unit_edges_static_alignment.parquet", "static_alignment_score"),
+        ("attention_routing", "graphs/unit_edges_attention_routing.parquet", "attention_routing_score"),
+        ("probe_response", "graphs/unit_edges_probe_response.parquet", "probe_response_score"),
+    ]
+    parts = []
+    for name, rel, field in specs:
         p = library.path(rel)
         if not p.exists():
             continue
-        for row in read_parquet(p).to_pylist():
-            key = (row["source_unit_id"], row["target_unit_id"])
-            rec = merged.setdefault(key, {
-                "source_unit_id": key[0], "target_unit_id": key[1],
-                "source_layer": row["source_layer"], "target_layer": row["target_layer"],
-                "activation_score": 0.0, "lagged_score": 0.0,
-                "static_alignment_score": 0.0, "attention_routing_score": 0.0,
-                "probe_response_score": 0.0, "causal_score": 0.0,
-            })
-            rec[field] = float(row.get(field, 0.0) or 0.0)
+        parts.append(
+            f"SELECT source_unit_id, target_unit_id, source_layer, target_layer, "
+            f"'{name}' AS ev, {field} AS score FROM read_parquet('{p}')")
+    names = ("activation", "lagged", "static_alignment",
+             "attention_routing", "probe_response", "causal")
+    if not parts:
+        from ..schemas import UNIT_EDGES_COMBINED
+        return UNIT_EDGES_COMBINED.empty_table()
 
     w = config.evidence_weights
-    out = []
-    for rec in merged.values():
-        combined = sum(w.get(name, 0.0) * rec[f"{name}_score"]
-                       for name in ("activation", "lagged", "static_alignment",
-                                    "attention_routing", "probe_response", "causal"))
-        rec["combined_score"] = float(combined)
-        #Confidence rises with the number of independent evidence types present.
-        present = sum(1 for name in ("activation", "lagged", "static_alignment",
-                                     "attention_routing", "probe_response", "causal")
-                      if rec[f"{name}_score"] > 0)
-        rec["edge_confidence"] = float(present / 6.0)
-        out.append(rec)
-    return out
+    union = " UNION ALL ".join(parts)
+
+    def csum(n):  # summed score for one evidence type
+        return f"sum(CASE WHEN ev='{n}' THEN score ELSE 0 END)"
+
+    score_cols = ", ".join(f"{csum(n)} AS {n}_score" for n in names)
+    combined_expr = " + ".join(f"{w.get(n, 0.0)} * {csum(n)}" for n in names)
+    present_expr = ("count(DISTINCT CASE WHEN score > 0 THEN ev END) / 6.0")
+
+    con = duckdb.connect()
+    return con.execute(
+        f"""
+        SELECT source_unit_id, target_unit_id,
+               CAST(max(source_layer) AS INTEGER) AS source_layer,
+               CAST(max(target_layer) AS INTEGER) AS target_layer,
+               {score_cols},
+               {combined_expr} AS combined_score,
+               {present_expr} AS edge_confidence
+        FROM ({union})
+        GROUP BY source_unit_id, target_unit_id
+        """
+    ).fetch_arrow_table()
