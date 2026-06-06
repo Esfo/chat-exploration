@@ -70,6 +70,10 @@ class ExtractionConfig:
     batch_size: int = 4
     #Per-unit number of strongest activation events to retain.
     top_events_per_unit: int = 16
+    #Top candidates kept per batch per unit before merging into the global top-k.
+    #>1 avoids missing true events when a unit's strongest tokens cluster in one
+    #batch (Issue 4).
+    top_candidates_per_batch: int = 8
     #Number of histogram bins for per-unit activation distributions.
     activation_hist_bins: int = 32
     #Activation thresholds are layer/component relative: a unit is "active" when

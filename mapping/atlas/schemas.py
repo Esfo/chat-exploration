@@ -223,6 +223,9 @@ ACTIVATION_STATS = _schema([
     ("sparsity_score", pa.float64()),
     ("specificity_score", pa.float64()),
     ("burstiness_score", pa.float64()),
+    #Per-unit active threshold (Issue 2) and active-bitset saturation (Issue 1).
+    ("active_threshold", pa.float64()),
+    ("bitset_density", pa.float64()),
 ])
 
 ACTIVATION_HISTOGRAMS = _schema([

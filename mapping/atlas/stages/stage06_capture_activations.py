@@ -107,6 +107,8 @@ def _build_groups(units, arch, config):
                 n_bits=config.bitset_positions, top_k=config.top_events_per_unit,
                 reservoir=config.reservoir_size, active_quantile=config.active_quantile,
                 seed=config.sketch_seed + layer_id,
+                top_m=config.top_candidates_per_batch,
+                sig_seed=config.sketch_seed,  # shared so signatures compare across layers
             ),
         }
     return groups
@@ -166,6 +168,7 @@ def _write_outputs(library, groups, run_id, hist_bins):
         spec = acc.specificity(); burst = acc.burstiness()
         quants = acc.quantiles(_QPOINTS)
         sig = acc.signature_normalized()
+        thr = acc.active_threshold(); bdens = acc.bitset_density()
 
         for i, uid in enumerate(uids):
             stat_rows.append({
@@ -181,6 +184,8 @@ def _write_outputs(library, groups, run_id, hist_bins):
                 "sparsity_score": float(1.0 - arate[i]),
                 "specificity_score": float(spec[i]),
                 "burstiness_score": float(burst[i]),
+                "active_threshold": float(thr[i]),
+                "bitset_density": float(bdens[i]),
             })
             #Histogram from reservoir samples (approximate distribution).
             res = acc.reservoir[i, : max(acc.reservoir_fill, 1)]
