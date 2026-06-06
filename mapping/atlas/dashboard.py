@@ -406,6 +406,204 @@ def page_graph(lib: str, tables: set[str]):
                          use_container_width=True)
 
 
+#----------------------------------------------------------------------
+# Plot Lab: freeform chart builder over any dataset
+#----------------------------------------------------------------------
+
+#Pre-joined, denormalized datasets so you can cross fields that live in
+#different tables (e.g. unit weights vs. their cluster). Each entry is
+#(SQL, required_tables). Raw tables are added on top at runtime.
+def _datasets(tables: set[str]) -> dict[str, str]:
+    ds: dict[str, str] = {}
+    if _has(tables, "unit_index"):
+        joins = "FROM unit_index u"
+        cols = ["u.unit_id", "u.layer_id", "u.unit_type"]
+        if "unit_static_stats" in tables:
+            cols += ["s.read_norm", "s.write_norm", "s.read_kurtosis", "s.write_kurtosis",
+                     "s.weight_tail_ratio", "s.static_outlier_score"]
+            joins += " LEFT JOIN unit_static_stats s USING (unit_id)"
+        if "activation_stats" in tables:
+            cols += ["a.activation_rate", "a.specificity_score", "a.burstiness_score",
+                     "a.mean AS act_mean", "a.std AS act_std", "a.observed_tokens"]
+            joins += " LEFT JOIN activation_stats a USING (unit_id)"
+        if "cluster_membership" in tables:
+            cols += ["cm.cluster_id"]
+            joins += (" LEFT JOIN cluster_membership cm "
+                      "ON cm.member_id = u.unit_id AND cm.member_type = 'unit'")
+        ds["units — catalog + weights + activations + cluster"] = \
+            f"SELECT {', '.join(cols)} {joins}"
+    if _has(tables, "cluster_index", "cluster_stats"):
+        ds["clusters — index + stats"] = (
+            "SELECT c.*, s.* EXCLUDE (cluster_id, member_count) "
+            "FROM cluster_index c LEFT JOIN cluster_stats s USING (cluster_id)")
+    if "unit_edges_combined" in tables:
+        ds["edges — combined graph"] = "SELECT * FROM unit_edges_combined"
+    if "tensor_stats" in tables:
+        ds["tensors — weight statistics"] = "SELECT * FROM tensor_stats"
+    return ds
+
+
+_NUMERIC_HINTS = ("INT", "FLOAT", "DOUBLE", "DECIMAL", "REAL", "HUGEINT")
+
+
+def _schema(lib: str, sql: str) -> dict[str, bool]:
+    """Return {column: is_numeric}, skipping list/struct columns."""
+    _, con = _connect(lib)
+    try:
+        desc = con.execute(f"DESCRIBE SELECT * FROM ({sql}) _t").df()
+    except Exception:  # noqa: BLE001
+        return {}
+    out = {}
+    for _, r in desc.iterrows():
+        t = str(r["column_type"]).upper()
+        if "[]" in t or "STRUCT" in t or "MAP" in t or "LIST" in t:
+            continue  # not plottable directly
+        out[r["column_name"]] = any(h in t for h in _NUMERIC_HINTS)
+    return out
+
+
+def page_plotlab(lib: str, tables: set[str]):
+    st.header("Plot Lab")
+    st.caption("Build any chart from any data: pick a dataset, columns, chart type, "
+               "filters, and aggregation.")
+
+    datasets = _datasets(tables)
+    #Offer the curated joins first, then every raw table/view.
+    options = list(datasets) + [f"raw: {t}" for t in sorted(tables)]
+    choice = st.selectbox("Dataset", options)
+    base_sql = datasets[choice] if choice in datasets else f"SELECT * FROM {choice[5:]}"
+
+    schema = _schema(lib, base_sql)
+    if not schema:
+        st.warning("Could not read this dataset's columns.")
+        return
+    cols = list(schema)
+    numeric = [c for c in cols if schema[c]]
+    none = "(none)"
+
+    #--- filters --------------------------------------------------------
+    with st.expander("Filters", expanded=False):
+        n_filters = st.number_input("How many filters", 0, 5, 0)
+        wheres = []
+        for i in range(int(n_filters)):
+            f1, f2, f3 = st.columns([2, 1, 2])
+            col = f1.selectbox("Column", cols, key=f"fc{i}")
+            op = f2.selectbox("Op", ["=", "!=", ">", ">=", "<", "<=", "contains"],
+                              key=f"fo{i}")
+            val = f3.text_input("Value", key=f"fv{i}")
+            if col and val != "":
+                if op == "contains":
+                    wheres.append(f"CAST({col} AS VARCHAR) ILIKE '%{val}%'")
+                else:
+                    lit = val if schema.get(col) and _is_number(val) else f"'{val}'"
+                    wheres.append(f"{col} {op} {lit}")
+    where_sql = (" WHERE " + " AND ".join(wheres)) if wheres else ""
+
+    #--- chart spec -----------------------------------------------------
+    chart_type = st.selectbox(
+        "Chart type", ["Histogram", "Scatter", "Bar", "Line", "Box", "Heatmap", "Table"])
+    limit = st.slider("Max rows to load", 1000, 100000, 20000, step=1000)
+
+    enc: dict[str, str] = {}
+    c1, c2, c3, c4 = st.columns(4)
+    if chart_type == "Histogram":
+        enc["x"] = c1.selectbox("Value (X)", numeric or cols)
+        enc["color"] = c2.selectbox("Group / color", [none] + cols)
+    elif chart_type == "Scatter":
+        enc["x"] = c1.selectbox("X", numeric or cols)
+        enc["y"] = c2.selectbox("Y", numeric or cols)
+        enc["color"] = c3.selectbox("Color", [none] + cols)
+        enc["size"] = c4.selectbox("Size", [none] + numeric)
+    elif chart_type in ("Bar", "Line"):
+        enc["x"] = c1.selectbox("X (category/axis)", cols)
+        enc["agg"] = c2.selectbox("Aggregate", ["count", "mean", "median", "sum", "min", "max"])
+        enc["y"] = c3.selectbox("Y (value)", [none] + numeric)
+        enc["color"] = c4.selectbox("Color", [none] + cols)
+    elif chart_type == "Box":
+        enc["x"] = c1.selectbox("Category (X)", cols)
+        enc["y"] = c2.selectbox("Value (Y)", numeric or cols)
+    elif chart_type == "Heatmap":
+        enc["x"] = c1.selectbox("X", cols)
+        enc["y"] = c2.selectbox("Y", cols)
+        enc["agg"] = c3.selectbox("Color = aggregate", ["count", "mean", "sum", "max"])
+        enc["cval"] = c4.selectbox("of (value)", [none] + numeric)
+
+    #--- fetch & render -------------------------------------------------
+    sql = f"SELECT * FROM ({base_sql}) _t{where_sql} LIMIT {int(limit)}"
+    with st.expander("Generated SQL"):
+        st.code(sql, language="sql")
+    df = _sql(lib, sql)
+    st.caption(f"{len(df)} rows loaded")
+    if df.empty:
+        return
+
+    if chart_type == "Table" or not _HAS_ALT:
+        st.dataframe(df, use_container_width=True, height=500)
+    else:
+        chart = _build_chart(df, chart_type, enc, none)
+        if chart is not None:
+            st.altair_chart(chart, use_container_width=True)
+    st.download_button("Download CSV", df.to_csv(index=False), "atlas_plotlab.csv",
+                       "text/csv")
+
+
+def _build_chart(df, chart_type, enc, none):
+    """Translate the chart spec into an Altair chart."""
+    try:
+        if chart_type == "Histogram":
+            e = {"x": alt.X(enc["x"], bin=alt.Bin(maxbins=50), type="quantitative"),
+                 "y": alt.Y("count()", title="count")}
+            if enc.get("color") and enc["color"] != none:
+                e["color"] = alt.Color(enc["color"] + ":N")
+            return alt.Chart(df).mark_bar(opacity=0.75).encode(**e).properties(height=380)
+
+        if chart_type == "Scatter":
+            e = {"x": alt.X(enc["x"], type="quantitative"),
+                 "y": alt.Y(enc["y"], type="quantitative"),
+                 "tooltip": list(df.columns[:8])}
+            if enc.get("color") and enc["color"] != none:
+                e["color"] = alt.Color(enc["color"] + ":N")
+            if enc.get("size") and enc["size"] != none:
+                e["size"] = alt.Size(enc["size"] + ":Q")
+            return alt.Chart(df).mark_circle(opacity=0.6).encode(**e) \
+                .interactive().properties(height=420)
+
+        if chart_type in ("Bar", "Line"):
+            agg = enc["agg"]
+            yfield = "count()" if agg == "count" or enc.get("y") in (none, None) \
+                else f"{agg}({enc['y']})"
+            e = {"x": alt.X(enc["x"] + ":N" if chart_type == "Bar" else enc["x"]),
+                 "y": alt.Y(yfield)}
+            if enc.get("color") and enc["color"] != none:
+                e["color"] = alt.Color(enc["color"] + ":N")
+            mark = alt.Chart(df).mark_bar() if chart_type == "Bar" else alt.Chart(df).mark_line(point=True)
+            return mark.encode(**e).properties(height=400)
+
+        if chart_type == "Box":
+            return alt.Chart(df).mark_boxplot().encode(
+                x=alt.X(enc["x"] + ":N"), y=alt.Y(enc["y"] + ":Q")).properties(height=400)
+
+        if chart_type == "Heatmap":
+            agg = enc["agg"]
+            cval = "count()" if agg == "count" or enc.get("cval") in (none, None) \
+                else f"{agg}({enc['cval']})"
+            return alt.Chart(df).mark_rect().encode(
+                x=alt.X(enc["x"] + ":O"), y=alt.Y(enc["y"] + ":O"),
+                color=alt.Color(cval, scale=alt.Scale(scheme="magma")),
+                tooltip=[enc["x"], enc["y"]]).properties(height=420)
+    except Exception as e:  # noqa: BLE001
+        st.warning(f"Could not build chart: {e}")
+    return None
+
+
+def _is_number(s: str) -> bool:
+    try:
+        float(s)
+        return True
+    except ValueError:
+        return False
+
+
 def page_sql(lib: str, tables: set[str]):
     st.header("SQL console")
     st.caption("Query any view directly. Tables: " + ", ".join(sorted(tables)))
@@ -439,12 +637,14 @@ def main():
         st.stop()
 
     tables = _tables(lib)
-    page = st.sidebar.radio("View", ["Overview", "Clusters", "Units",
+    page = st.sidebar.radio("View", ["Overview", "Plot Lab", "Clusters", "Units",
                                      "Connection graph", "SQL console"])
     st.sidebar.caption(f"{len(tables)} tables available")
 
     if page == "Overview":
         page_overview(lib, tables)
+    elif page == "Plot Lab":
+        page_plotlab(lib, tables)
     elif page == "Clusters":
         page_clusters(lib, tables)
     elif page == "Units":
