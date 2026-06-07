@@ -92,19 +92,20 @@ learning_rate = 3e-4
 #how often (in steps) to print the training loss to stdout
 log_every = 100
 
-#where to save the trained model - the "save name". every checkpoint is written
-#as its own numbered file inside a folder named after this, so the path
-#'/home/sfo/data/models/model.pt' saves into the folder '/home/sfo/data/models/model/'
-#as model_0000001.pt, model_0000002.pt, ... (one new file per save).
+#where to save the trained model. this is the save folder, and its name is the
+#"save name": every checkpoint is written as its own numbered file inside it, so
+#'/home/sfo/data/models/model' saves into '/home/sfo/data/models/model/' as
+#model_0000001.pt, model_0000002.pt, ... (one new file per save).
 #saved on each periodic checkpoint and once when the loss target is reached; NOT
 #saved on interruption (ctrl-c). set to False to skip saving entirely.
-model_output = '/home/sfo/data/models/model.pt'
+model_output = '/home/sfo/data/models/model'
 #model_output = False
 
 #path to an existing saved model to continue training from.
-#set to a saved .pt path to resume; False to start from fresh random weights.
+#set to a saved checkpoint .pt to resume; False to start from fresh random
+#weights. checkpoints now live inside the save folder as numbered files.
 resume_from = False
-#resume_from = '/home/sfo/data/models/model.pt'
+#resume_from = '/home/sfo/data/models/model/model_0000005.pt'
 
 #early-stopping target: training runs (no fixed step count) until the average
 #loss over the last target_window steps drops to/below target_loss.

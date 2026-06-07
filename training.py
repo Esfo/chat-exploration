@@ -63,13 +63,13 @@ class Config:
 
     #=== run controls (defaults; main.py overrides) ===
 
-    #where to write the trained model. this is the "save name": every checkpoint
-    #is written as its own numbered file inside a folder named after it, so
-    #model_output='.../model.pt' saves into '.../model/' as model_0000001.pt,
+    #where to write the trained model. this is the save folder, and its name is
+    #the "save name": every checkpoint is written as its own numbered file inside
+    #it, so model_output='.../model' saves into '.../model/' as model_0000001.pt,
     #model_0000002.pt, ... - one new file per save, nothing ever overwritten.
     #the model is saved on each periodic checkpoint and once more when the loss
     #target is reached; it is NOT saved if training is interrupted (ctrl-c).
-    #set to a path like 'model.pt' to save; leave as "" / False to skip saving.
+    #set to a path like '.../model' to save; leave as "" / False to skip saving.
     model_output: str = ""
 
     #path to an existing saved model to continue training from.
