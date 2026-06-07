@@ -39,16 +39,24 @@ training = True
 #shorter context = cheaper attention and faster steps for a quick small model
 context_length = 64
 
-#width of the model's internal token vector
-d_model = 192
+#per-layer hidden widths: one transformer block is built per entry, at that
+#width, with a projection between consecutive blocks to carry the hidden state
+#across each width change. this single list controls both depth (how many
+#blocks) and width (how wide each is) - n_layers is derived from its length, not
+#configured separately. the model starts at the first width and ends at the
+#last, so [32, 64, 128, 256] expands 32 -> 64 -> 128 -> 256 with depth. add a
+#wider final layer just by appending, e.g. [32, 64, 128, 256, 512]; every width
+#must be divisible by head_dim.
+layer_widths = [32, 64, 128, 256]
 
-#number of transformer blocks
-n_layers = 2
+#width of one attention head. each block's head count is derived from its own
+#width (n_heads = width / head_dim), so heads grow as the widths do: with
+#head_dim 32 the widths above give 1, 2, 4, 8 heads. must divide every width,
+#and must be even when use_rope is True.
+head_dim = 32
 
-#width of one attention head (n_heads = d_model / head_dim)
-head_dim = 64
-
-#controls how wide the MLP part gets inside each transformer block
+#controls how wide the MLP part gets inside each transformer block. each block
+#sizes its own MLP from its own width (d_ff = width * mlp_multiplier).
 mlp_multiplier = 4.0
 
 #save the encoded corpus (the whole corpus as one integer token-ID tensor, NOT
@@ -65,6 +73,13 @@ use_rope = True
 #use a SwiGLU gated MLP instead of the plain GELU MLP. modern standard, small
 #quality bump, slightly more params/compute per block. set False for plain GELU.
 use_swiglu = True
+
+#tie the output head's weights to the token embedding to save parameters. only
+#valid when the first and last layer_widths are equal (the embedding is sized to
+#the first width, the head to the last). the expanding stack above has different
+#first/last widths, so this must stay False; set True only for a uniform-width
+#layer_widths like [256, 256, 256, 256].
+tie_weights = False
 
 #number of chunks trained together in one update
 batch_size = 64
@@ -176,12 +191,12 @@ def run():
 
     cfg = Config(
         context_length=context_length,
-        d_model=d_model,
-        n_layers=n_layers,
+        layer_widths=layer_widths,
         head_dim=head_dim,
         mlp_multiplier=mlp_multiplier,
         use_rope=use_rope,
         use_swiglu=use_swiglu,
+        tie_weights=tie_weights,
         #paths come from this gateway, not from training.py
         tokenpath=str(tokensfile),
         textsource=textsource,

@@ -23,18 +23,19 @@ class Config:
     #number of tokens per training chunk
     context_length: int
 
-    #width of the model's internal token vector
-    #means every token becomes a vector with this many numbers
-    d_model: int
+    #per-layer hidden widths: one transformer block is built per entry, at that
+    #width. this single list is the source of truth for both model depth (how
+    #many blocks) and width (how wide each block is). the model starts at
+    #layer_widths[0]; a projection between consecutive blocks changes the width
+    #from one entry to the next. e.g. [32, 64, 128, 256] builds four blocks that
+    #expand 32 -> 64 -> 128 -> 256 as data flows deeper through the stack.
+    #n_layers is derived from this list, never configured separately.
+    layer_widths: list[int]
 
-    #number of transformer blocks
-    #each block contains:
-        #attention
-        #feed-forward / MLP
-    n_layers: int
-
-    #width of one attention head.
-    #n_heads is calculated from: n_heads = d_model / head_dim
+    #width of one attention head. each block derives its own head count from its
+    #own width: n_heads = width / head_dim. kept global (not per-layer) so the
+    #attention shape logic and the RoPE cache stay simple - every head is the
+    #same size regardless of which block it lives in.
     head_dim: int
 
     #controls how wide the MLP part gets inside each transformer block
@@ -153,6 +154,13 @@ class Config:
     #cost is one extra projection per block (slightly more params/compute).
     use_swiglu: bool = False
 
+    #tie the output head's weights to the token embedding (a standard small-model
+    #trick that saves parameters). only valid when input_width == final_width,
+    #because the embedding is sized to the first width and the head to the last.
+    #defaults off because the expanding-width architecture usually has different
+    #first and last widths (e.g. 32 in, 256 out), which makes tying impossible.
+    tie_weights: bool = False
+
     #number of possible token IDs
         #this gets set after the tokenizer builds the vocabulary from tokenpath
         #+ 1 padding token
@@ -162,21 +170,68 @@ class Config:
     vocab_size: int = 0
 
     @property
-    def n_heads(self):
-        """
-        calculation of attention heads
-        """
+    def n_layers(self):
+        """number of transformer blocks - one per configured width."""
 
-        assert self.d_model % self.head_dim == 0
-        return self.d_model // self.head_dim
+        return len(self.layer_widths)
 
     @property
-    def d_ff(self):
-        """
-        width of the feed-forward / MLP hidden layer.
-        """
+    def input_width(self):
+        """width the model starts at (token embedding + first block)."""
 
-        return int(self.d_model * self.mlp_multiplier)
+        return self.layer_widths[0]
+
+    @property
+    def final_width(self):
+        """width the model ends at (final norm + output head)."""
+
+        return self.layer_widths[-1]
+
+    def n_heads_for_width(self, width):
+        """attention head count for a block of the given width."""
+
+        assert width % self.head_dim == 0
+        return width // self.head_dim
+
+    def d_ff_for_width(self, width):
+        """feed-forward / MLP hidden width for a block of the given width."""
+
+        return int(width * self.mlp_multiplier)
+
+
+def validate_architecture(cfg):
+    """
+    fail fast, with a clear message, if a config describes an architecture the
+    model cannot build. called at the top of GPT.__init__ so an invalid shape
+    surfaces here rather than as a cryptic error deep inside a Linear/reshape.
+    """
+
+    if not cfg.layer_widths:
+        raise ValueError("layer_widths must contain at least one width")
+
+    for width in cfg.layer_widths:
+        if width <= 0:
+            raise ValueError("all layer widths must be positive")
+
+        #each block splits its width into head_dim-sized heads, so the width has
+        #to divide evenly or the attention reshape would lose/forge elements.
+        if width % cfg.head_dim != 0:
+            raise ValueError(
+                f"width {width} must be divisible by head_dim {cfg.head_dim}"
+            )
+
+    #RoPE rotates dimensions in pairs (the two halves of each head), so a head
+    #has to have an even number of dimensions.
+    if cfg.use_rope and cfg.head_dim % 2 != 0:
+        raise ValueError("RoPE requires an even head_dim")
+
+    #the embedding is sized to the first width and the head to the last, so the
+    #two can only share a weight matrix when those widths are equal.
+    if cfg.tie_weights and cfg.input_width != cfg.final_width:
+        raise ValueError(
+            "tie_weights requires first and final layer widths to match "
+            f"(got input_width {cfg.input_width}, final_width {cfg.final_width})"
+        )
 
 
 #paragraph tokenising is pure-Python and CPU-bound, so it parallelises well
@@ -422,29 +477,34 @@ class Block(nn.Module):
     stable, standard arrangement and what fixes the original norm-free model.
     """
 
-    def __init__(self, cfg):
+    def __init__(self, width, head_dim, mlp_multiplier, use_swiglu):
         super().__init__()
-        self.n_heads = cfg.n_heads
-        self.head_dim = cfg.head_dim
-        self.use_swiglu = cfg.use_swiglu
+        #the block is fixed-width internally: it takes a `width`-vector per token
+        #and returns a `width`-vector, so attention/MLP outputs can be added back
+        #onto the residual stream. width changes happen between blocks, not here.
+        self.width = width
+        self.head_dim = head_dim
+        self.n_heads = width // head_dim
+        self.d_ff = int(width * mlp_multiplier)
+        self.use_swiglu = use_swiglu
 
-        self.ln1 = nn.LayerNorm(cfg.d_model)
+        self.ln1 = nn.LayerNorm(width)
         #fused query/key/value projection: one matmul instead of three
-        self.qkv = nn.Linear(cfg.d_model, 3 * cfg.d_model)
-        self.proj = nn.Linear(cfg.d_model, cfg.d_model)
+        self.qkv = nn.Linear(width, 3 * width)
+        self.proj = nn.Linear(width, width)
 
-        self.ln2 = nn.LayerNorm(cfg.d_model)
-        if cfg.use_swiglu:
+        self.ln2 = nn.LayerNorm(width)
+        if use_swiglu:
             #SwiGLU: two input projections (a "gate" and an "up"), combined as
             #silu(gate) * up, then projected back down. the gate lets the block
             #learn which features to let through, which plain GELU can't.
-            self.fc_gate = nn.Linear(cfg.d_model, cfg.d_ff)
-            self.fc_up = nn.Linear(cfg.d_model, cfg.d_ff)
-            self.fc_down = nn.Linear(cfg.d_ff, cfg.d_model)
+            self.fc_gate = nn.Linear(width, self.d_ff)
+            self.fc_up = nn.Linear(width, self.d_ff)
+            self.fc_down = nn.Linear(self.d_ff, width)
         else:
             #plain MLP: expand, GELU, shrink back
-            self.fc1 = nn.Linear(cfg.d_model, cfg.d_ff)
-            self.fc2 = nn.Linear(cfg.d_ff, cfg.d_model)
+            self.fc1 = nn.Linear(width, self.d_ff)
+            self.fc2 = nn.Linear(self.d_ff, width)
 
     def mlp(self, x):
         if self.use_swiglu:
@@ -487,41 +547,77 @@ class Block(nn.Module):
 class GPT(nn.Module):
     """
     the whole model: token embeddings (+ position info), a stack of transformer
-    blocks, a final norm, and an output head that scores every possible next
-    token.
+    blocks at progressively-changing widths, a final norm, and an output head
+    that scores every possible next token.
+
+    the stack is variable-width: each block is built at its own width from
+    cfg.layer_widths, and a linear projection between consecutive blocks carries
+    the hidden state from one width to the next. the model starts at input_width
+    (the first entry) and ends at final_width (the last), so for
+    [32, 64, 128, 256] the hidden state grows 32 -> 64 -> 128 -> 256 with depth.
 
     position is handled one of two ways depending on cfg.use_rope:
       - RoPE: queries/keys are rotated by position inside attention (no table)
       - learned: a position-embedding table is added to the token vectors
 
-    the output head shares its weights with the token embedding (weight tying),
-    a standard trick that cuts parameters and tends to help small models.
+    the output head can optionally share its weights with the token embedding
+    (cfg.tie_weights), but only when input_width == final_width; the expanding
+    architecture usually has different first/last widths, so tying is off by
+    default.
     """
 
     def __init__(self, cfg):
         super().__init__()
+        #reject invalid architectures up front with a clear message
+        validate_architecture(cfg)
+
         self.cfg = cfg
         self.use_rope = cfg.use_rope
 
-        self.tok_emb = nn.Embedding(cfg.vocab_size, cfg.d_model)
+        #the model begins at the first configured width: token (and position)
+        #vectors are input_width-wide before they reach the first block.
+        self.tok_emb = nn.Embedding(cfg.vocab_size, cfg.input_width)
 
         if self.use_rope:
-            if cfg.head_dim % 2 != 0:
-                raise ValueError(f"use_rope needs an even head_dim, got {cfg.head_dim}")
             #precompute the rotation tables once and ship them with the model
             #(non-persistent: rebuilt on load, never saved into the checkpoint).
+            #head_dim is global, so one cache serves every block's attention.
             cos, sin = build_rope_cache(cfg.context_length, cfg.head_dim, device="cpu")
             self.register_buffer("rope_cos", cos, persistent=False)
             self.register_buffer("rope_sin", sin, persistent=False)
         else:
-            self.pos_emb = nn.Embedding(cfg.context_length, cfg.d_model)
+            self.pos_emb = nn.Embedding(cfg.context_length, cfg.input_width)
 
-        self.blocks = nn.ModuleList(Block(cfg) for _ in range(cfg.n_layers))
-        self.ln_f = nn.LayerNorm(cfg.d_model)
-        self.head = nn.Linear(cfg.d_model, cfg.vocab_size, bias=False)
+        #one transformer block per configured width, plus one projection between
+        #each pair of consecutive widths to carry the hidden state across the
+        #width change. for [32, 64, 128, 256] that's 4 blocks and 3 projections:
+        #  Block(32) -> Linear(32->64) -> Block(64) -> Linear(64->128) -> ...
+        self.blocks = nn.ModuleList()
+        self.width_projections = nn.ModuleList()
+        for i, width in enumerate(cfg.layer_widths):
+            self.blocks.append(
+                Block(
+                    width=width,
+                    head_dim=cfg.head_dim,
+                    mlp_multiplier=cfg.mlp_multiplier,
+                    use_swiglu=cfg.use_swiglu,
+                )
+            )
+            if i < len(cfg.layer_widths) - 1:
+                next_width = cfg.layer_widths[i + 1]
+                self.width_projections.append(nn.Linear(width, next_width))
 
-        #weight tying: the output head reuses the embedding matrix
-        self.head.weight = self.tok_emb.weight
+        #final norm + output head operate at the last (widest) width
+        self.ln_f = nn.LayerNorm(cfg.final_width)
+        self.head = nn.Linear(cfg.final_width, cfg.vocab_size, bias=False)
+
+        #weight tying is optional and only possible when the embedding and head
+        #are the same width. validate_architecture already enforced this, but the
+        #guard keeps the tying self-documenting and safe if called directly.
+        if cfg.tie_weights:
+            if cfg.input_width != cfg.final_width:
+                raise ValueError("tie_weights requires input_width == final_width")
+            self.head.weight = self.tok_emb.weight
 
         self.apply(self._init_weights)
 
@@ -552,8 +648,13 @@ class GPT(nn.Module):
             h = self.tok_emb(x) + self.pos_emb(positions)[None, :, :]
             rope = None
 
-        for block in self.blocks:
+        #run each block at its own width, then project the hidden state up to the
+        #next block's width. the final block has no projection after it - its
+        #output flows straight into the final norm and output head.
+        for i, block in enumerate(self.blocks):
             h = block(h, rope)
+            if i < len(self.width_projections):
+                h = self.width_projections[i](h)
 
         h = self.ln_f(h)
         logits = self.head(h)
@@ -731,8 +832,7 @@ def generate(
 #are intentionally left out.
 _SAVED_CONFIG_FIELDS = (
     "context_length",
-    "d_model",
-    "n_layers",
+    "layer_widths",
     "head_dim",
     "mlp_multiplier",
     "tokenpath",
@@ -742,7 +842,96 @@ _SAVED_CONFIG_FIELDS = (
     "vocab_size",
     "use_rope",
     "use_swiglu",
+    "tie_weights",
 )
+
+
+def _architecture_from_meta(config_meta):
+    """
+    reconstruct the architecture-defining fields (layer_widths, tie_weights) from
+    a saved checkpoint's config, transparently upgrading older single-width
+    checkpoints that predate these fields.
+
+    old checkpoints stored a single d_model + n_layers and tied the output head
+    unconditionally; that is equivalent to a uniform-width stack with tying on
+    (its first and last widths are equal, so tying was always valid). newer
+    checkpoints store layer_widths and tie_weights directly.
+
+    returns (layer_widths, tie_weights).
+    """
+
+    if "layer_widths" in config_meta:
+        layer_widths = list(config_meta["layer_widths"])
+    else:
+        #a same-width stack: d_model repeated n_layers times
+        layer_widths = [config_meta["d_model"]] * config_meta["n_layers"]
+
+    #new checkpoints carry the real flag; for old ones, mirror the unconditional
+    #tying the original file did (only ever valid because the widths were uniform)
+    tie_weights = config_meta.get("tie_weights", layer_widths[0] == layer_widths[-1])
+
+    return layer_widths, tie_weights
+
+
+def _check_resume_compatible(saved_config, cfg):
+    """
+    raise a clear, specific error if a checkpoint cannot be resumed into the
+    current config, instead of letting load_state_dict fail with a cryptic shape
+    mismatch. resume is intentionally strict: any architecture change starts a
+    fresh model rather than trying to partially load the old weights.
+    """
+
+    #the loaded weights only make sense if the vocabulary matches, otherwise the
+    #embedding table and output head have the wrong number of rows/columns.
+    saved_vocab = saved_config["vocab_size"]
+    if saved_vocab != cfg.vocab_size:
+        raise ValueError(
+            f"saved model vocab_size ({saved_vocab}) does not match "
+            f"current tokenizer vocab_size ({cfg.vocab_size}). "
+            "use the same tokenpath the model was trained with."
+        )
+
+    saved_layer_widths, saved_tie_weights = _architecture_from_meta(saved_config)
+
+    #every field below changes the parameter shapes or the forward behaviour, so
+    #a mismatch must stop the resume rather than load into the wrong architecture.
+    if saved_layer_widths != cfg.layer_widths:
+        raise ValueError(
+            f"saved model layer_widths {saved_layer_widths} do not match "
+            f"current layer_widths {cfg.layer_widths}"
+        )
+
+    if saved_config["head_dim"] != cfg.head_dim:
+        raise ValueError(
+            f"saved model head_dim {saved_config['head_dim']} does not match "
+            f"current head_dim {cfg.head_dim}"
+        )
+
+    if saved_config["mlp_multiplier"] != cfg.mlp_multiplier:
+        raise ValueError(
+            f"saved model mlp_multiplier {saved_config['mlp_multiplier']} does "
+            f"not match current mlp_multiplier {cfg.mlp_multiplier}"
+        )
+
+    saved_use_rope = saved_config.get("use_rope", False)
+    if saved_use_rope != cfg.use_rope:
+        raise ValueError(
+            f"saved model use_rope {saved_use_rope} does not match "
+            f"current use_rope {cfg.use_rope}"
+        )
+
+    saved_use_swiglu = saved_config.get("use_swiglu", False)
+    if saved_use_swiglu != cfg.use_swiglu:
+        raise ValueError(
+            f"saved model use_swiglu {saved_use_swiglu} does not match "
+            f"current use_swiglu {cfg.use_swiglu}"
+        )
+
+    if saved_tie_weights != cfg.tie_weights:
+        raise ValueError(
+            f"saved model tie_weights {saved_tie_weights} does not match "
+            f"current tie_weights {cfg.tie_weights}"
+        )
 
 
 def save_model(path, model, optimizer, cfg, step):
@@ -788,10 +977,12 @@ def load_model(path, device="cpu"):
     checkpoint = torch.load(path, map_location=device, weights_only=False)
     config_meta = checkpoint["config"]
 
+    #rebuild the architecture, upgrading older single-width checkpoints on the fly
+    layer_widths, tie_weights = _architecture_from_meta(config_meta)
+
     cfg = Config(
         context_length=config_meta["context_length"],
-        d_model=config_meta["d_model"],
-        n_layers=config_meta["n_layers"],
+        layer_widths=layer_widths,
         head_dim=config_meta["head_dim"],
         mlp_multiplier=config_meta["mlp_multiplier"],
         tokenpath=config_meta["tokenpath"],
@@ -802,6 +993,7 @@ def load_model(path, device="cpu"):
         #.get(...) defaults keep models saved before these options existed loadable
         use_rope=config_meta.get("use_rope", False),
         use_swiglu=config_meta.get("use_swiglu", False),
+        tie_weights=tie_weights,
         vocab_size=config_meta["vocab_size"],
     )
 
@@ -837,22 +1029,30 @@ def train(cfg):
         #number of possible next-token choices
     cfg.vocab_size = tokenizer.vocab_size
 
+    #per-block attention head counts and MLP hidden widths, derived from each
+    #block's width - makes it obvious the intended variable-width stack is built.
+    heads_by_layer = [cfg.n_heads_for_width(w) for w in cfg.layer_widths]
+    d_ff_by_layer = [cfg.d_ff_for_width(w) for w in cfg.layer_widths]
+
     print("Minimal hard-coded inputs:")
     print(f"vocab_size     = {cfg.vocab_size}")
     print(f"context_length = {cfg.context_length}")
-    print(f"d_model        = {cfg.d_model}")
+    print(f"layer_widths   = {cfg.layer_widths}")
     print(f"n_layers       = {cfg.n_layers}")
 
     print("\nSoft-coded from those:")
-    print(f"embedding_size = {cfg.vocab_size} × {cfg.d_model}")
-    print(f"output_head    = {cfg.d_model} × {cfg.vocab_size} (tied to embedding)")
+    print(f"input_width    = {cfg.input_width}")
+    print(f"final_width    = {cfg.final_width}")
+    print(f"embedding_size = {cfg.vocab_size} × {cfg.input_width}")
+    tied_note = " (tied to embedding)" if cfg.tie_weights else ""
+    print(f"output_head    = {cfg.final_width} × {cfg.vocab_size}{tied_note}")
     print(f"head_dim       = {cfg.head_dim}")
-    print(f"n_heads        = {cfg.n_heads}")
-    print(f"d_ff           = {cfg.d_ff}")
-    print(f"mlp_size       = {cfg.d_model} × {cfg.d_ff}")
+    print(f"heads_by_layer = {heads_by_layer}")
+    print(f"d_ff_by_layer  = {d_ff_by_layer}")
     print(f"total_blocks   = {cfg.n_layers}")
     print(f"position_enc   = {'RoPE' if cfg.use_rope else 'learned'}")
     print(f"mlp_type       = {'SwiGLU' if cfg.use_swiglu else 'GELU'}")
+    print(f"tie_weights    = {cfg.tie_weights}")
     print(f"\ndevice         = {device} | optimizer = {cfg.optimizer} | amp = {cfg.use_amp}")
 
     #make checkpointing status obvious up front so a silent "model_output = False"
@@ -884,15 +1084,10 @@ def train(cfg):
         print(f"\nresuming from {cfg.resume_from}", flush=True)
         checkpoint = torch.load(cfg.resume_from, map_location=device, weights_only=False)
 
-        #the loaded weights only make sense if the vocabulary matches, otherwise
-        #the embedding table and output head have the wrong number of rows/columns.
-        saved_vocab = checkpoint["config"]["vocab_size"]
-        if saved_vocab != cfg.vocab_size:
-            raise ValueError(
-                f"saved model vocab_size ({saved_vocab}) does not match "
-                f"current tokenizer vocab_size ({cfg.vocab_size}). "
-                "use the same tokenpath the model was trained with."
-            )
+        #the weights only make sense if the vocabulary and architecture match;
+        #this raises a clear error on any mismatch instead of a cryptic shape
+        #failure inside load_state_dict. resume is strict by design.
+        _check_resume_compatible(checkpoint["config"], cfg)
 
         model.load_state_dict(checkpoint["model"])
 

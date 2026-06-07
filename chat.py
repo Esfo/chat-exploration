@@ -90,7 +90,7 @@ def main():
 
     print(f"loaded model from {args.model}")
     print(f"vocab_size={cfg.vocab_size} context_length={cfg.context_length} "
-          f"d_model={cfg.d_model} n_layers={cfg.n_layers}")
+          f"layer_widths={cfg.layer_widths} n_layers={cfg.n_layers}")
     print(f"position_enc={'RoPE' if cfg.use_rope else 'learned'} "
           f"mlp={'SwiGLU' if cfg.use_swiglu else 'GELU'} "
           f"device={next(model.parameters()).device}")
