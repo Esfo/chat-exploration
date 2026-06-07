@@ -90,11 +90,14 @@ batch_size = 64
 learning_rate = 3e-4
 
 #how often (in steps) to print the training loss to stdout
-log_every = 10
+log_every = 100
 
-#where to save the trained model.
-#saved on the periodic checkpoint, when the loss target is reached, and on
-#interruption (ctrl-c). set to False to skip saving entirely.
+#where to save the trained model - the "save name". every checkpoint is written
+#as its own numbered file inside a folder named after this, so the path
+#'/home/sfo/data/models/model.pt' saves into the folder '/home/sfo/data/models/model/'
+#as model_0000001.pt, model_0000002.pt, ... (one new file per save).
+#saved on each periodic checkpoint and once when the loss target is reached; NOT
+#saved on interruption (ctrl-c). set to False to skip saving entirely.
 model_output = '/home/sfo/data/models/model.pt'
 #model_output = False
 
@@ -109,8 +112,9 @@ resume_from = False
 target_loss = 0.1
 target_window = 100
 
-#save a checkpoint every this many steps so progress survives a crash.
-checkpoint_every = 200
+#save a checkpoint every this many steps so progress survives a crash. each
+#checkpoint is a new numbered file in the save folder, so nothing is overwritten.
+checkpoint_every = 10000
 
 
 #=== hardware / speed ===

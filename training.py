@@ -63,9 +63,12 @@ class Config:
 
     #=== run controls (defaults; main.py overrides) ===
 
-    #where to write the trained model.
-    #the model is saved here on the periodic checkpoint, when the loss target is
-    #reached, and if training is interrupted (ctrl-c).
+    #where to write the trained model. this is the "save name": every checkpoint
+    #is written as its own numbered file inside a folder named after it, so
+    #model_output='.../model.pt' saves into '.../model/' as model_0000001.pt,
+    #model_0000002.pt, ... - one new file per save, nothing ever overwritten.
+    #the model is saved on each periodic checkpoint and once more when the loss
+    #target is reached; it is NOT saved if training is interrupted (ctrl-c).
     #set to a path like 'model.pt' to save; leave as "" / False to skip saving.
     model_output: str = ""
 
@@ -81,9 +84,10 @@ class Config:
     #how many recent steps the average is taken over when checking target_loss.
     target_window: int = 100
 
-    #save a checkpoint to model_output every this many steps, so progress
-    #survives a crash or interruption even between the start and the target.
-    checkpoint_every: int = 200
+    #save a checkpoint every this many steps, so progress survives a crash even
+    #between the start and the target. each checkpoint is a new numbered file in
+    #the save folder (see model_output), so none of the history is overwritten.
+    checkpoint_every: int = 10000
 
     #=== hardware / speed (the modern, GPU-oriented knobs) ===
 
@@ -934,6 +938,39 @@ def _check_resume_compatible(saved_config, cfg):
         )
 
 
+#how many digits each checkpoint number is zero-padded to in its filename. a
+#generous width keeps a plain alphabetical listing of the save folder in the
+#same order the checkpoints were written.
+_CHECKPOINT_PAD = 7
+
+
+def checkpoint_folder(model_output):
+    """
+    the folder every numbered checkpoint for a given save name is written into.
+
+    the folder is named after the save name (the model_output stem), so
+    model_output='/a/b/model.pt' -> '/a/b/model'.
+    """
+
+    directory = os.path.dirname(model_output)
+    stem = os.path.splitext(os.path.basename(model_output))[0]
+    return os.path.join(directory, stem) if directory else stem
+
+
+def checkpoint_path(model_output, number):
+    """
+    build the path for one numbered checkpoint inside the save folder.
+
+    e.g. model_output='/a/b/model.pt', number=1 -> '/a/b/model/model_0000001.pt'.
+    every save is its own file so the folder keeps the whole history instead of a
+    single overwritten model; the number is zero-padded so the files sort in order.
+    """
+
+    stem = os.path.splitext(os.path.basename(model_output))[0]
+    filename = f"{stem}_{number:0{_CHECKPOINT_PAD}d}.pt"
+    return os.path.join(checkpoint_folder(model_output), filename)
+
+
 def save_model(path, model, optimizer, cfg, step):
     """
     save weights + optimiser state + architecture config to a single .pt file.
@@ -1059,8 +1096,9 @@ def train(cfg):
     #never looks like training that mysteriously saved nothing.
     if cfg.model_output:
         print(
-            f"checkpoints    = ON -> {cfg.model_output} "
-            f"(every {cfg.checkpoint_every} steps, plus on stop/interrupt)"
+            f"checkpoints    = ON -> {checkpoint_folder(cfg.model_output)}/ "
+            f"(a new numbered file every {cfg.checkpoint_every} steps; "
+            f"not saved on interrupt)"
         )
     else:
         print("checkpoints    = OFF (model_output is not set; nothing will be saved!)")
@@ -1177,9 +1215,14 @@ def train(cfg):
                     val_loss = evaluate(model, val_loader, device, cfg.val_batches)
                     print(f"  [val] step={step} val_loss={val_loss:.4f}", flush=True)
 
-                #periodic checkpoint so progress survives a crash/interruption
+                #periodic checkpoint so progress survives a crash; each save is a
+                #new numbered file (the Nth checkpoint) inside the save folder.
                 if cfg.model_output and step % cfg.checkpoint_every == 0:
-                    save_model(cfg.model_output, model, optimizer, cfg, step)
+                    number = step // cfg.checkpoint_every
+                    save_model(
+                        checkpoint_path(cfg.model_output, number),
+                        model, optimizer, cfg, step,
+                    )
 
                 #early stop once a full window of recent losses averages to target
                 if (
@@ -1196,14 +1239,20 @@ def train(cfg):
                     )
                     raise StopIteration
     except StopIteration:
-        pass
+        #target reached: capture the finished model. if this step already landed
+        #on a checkpoint boundary it was just saved in the loop, so only add a
+        #final file when the last checkpoint isn't already this exact step. it is
+        #numbered just past the last periodic checkpoint so it sorts last.
+        if cfg.model_output and step % cfg.checkpoint_every != 0:
+            number = step // cfg.checkpoint_every + 1
+            save_model(
+                checkpoint_path(cfg.model_output, number),
+                model, optimizer, cfg, step,
+            )
     except KeyboardInterrupt:
-        #ctrl-c: stop training but keep what we have
-        print(f"\ninterrupted at step {step}", flush=True)
-
-    #persist the final weights so they can be reused for inference or resumed.
-    if cfg.model_output:
-        save_model(cfg.model_output, model, optimizer, cfg, step)
+        #ctrl-c: stop training but keep what we have. by design we do NOT save on
+        #interrupt - only the periodic checkpoints already on disk are kept.
+        print(f"\ninterrupted at step {step} (not saving on interrupt)", flush=True)
 
     print(generate("", tokenizer, model, cfg))
 
