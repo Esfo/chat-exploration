@@ -270,6 +270,41 @@ def build_parser() -> argparse.ArgumentParser:
     cmp_.add_argument("--dtype", default=None)
     cmp_.add_argument("--max-new-tokens", dest="max_new_tokens", type=int, default=None)
 
+    sd = sub.add_parser("score-data",
+                        help="score + label training rows (KEEP/DROP/REVIEW/...)")
+    sd.add_argument("--model", required=True,
+                    help="model used to compute assistant-only loss per row")
+    sd.add_argument("--tokenizer", default=None)
+    sd.add_argument("--dataset", required=True, help="training data .jsonl")
+    sd.add_argument("--eval-summary", dest="eval_summary", default=None,
+                    help="optional eval_summary.json to drive category COLLECT_MORE recs")
+    sd.add_argument("--eval-out", dest="eval_out", default="atlas_eval",
+                    help="base output dir (default: %(default)s)")
+    sd.add_argument("--device", default=None)
+    sd.add_argument("--dtype", default=None)
+
+    fd = sub.add_parser("filter-data",
+                        help="split a dataset into keep/drop/review using score-data output")
+    fd.add_argument("--dataset", default=None,
+                    help="original .jsonl (optional; falls back to score-data's source_rows)")
+    fd.add_argument("--scores", required=True,
+                    help="sample_recommendations.jsonl from score-data")
+    fd.add_argument("--mode", choices=["conservative", "normal", "aggressive"],
+                    default="conservative")
+    fd.add_argument("--keep-out", dest="keep_out", required=True)
+    fd.add_argument("--drop-out", dest="drop_out", required=True)
+    fd.add_argument("--review-out", dest="review_out", default=None)
+
+    ed = sub.add_parser("export-data-filter",
+                        help="export kept/dropped datasets from a score-data run dir")
+    ed.add_argument("--score-run", dest="score_run", required=True,
+                    help="path to a data_scores/ dir (or its parent) from score-data")
+    ed.add_argument("--mode", choices=["conservative", "normal", "aggressive"],
+                    default="conservative")
+    ed.add_argument("--keep-out", dest="keep_out", required=True)
+    ed.add_argument("--drop-out", dest="drop_out", required=True)
+    ed.add_argument("--review-out", dest="review_out", default=None)
+
     runall = sub.add_parser("run-all", help="run the full V1 pipeline in order")
     runall.add_argument("--force", action="store_true",
                         help="rerun every stage even if its outputs already exist")
@@ -329,17 +364,59 @@ def _run_compare(args) -> None:
     print(f"  artifacts: {summary['_artifacts']['dir']}")
 
 
+def _run_score_data(args) -> None:
+    import json
+    from .evaluation import score_dataset
+    backend = _eval_backend(args.model, args.tokenizer, args)
+    eval_summary = None
+    if args.eval_summary:
+        eval_summary = json.loads(Path(args.eval_summary).read_text())
+    summary = score_dataset(backend, args.dataset, out_dir=args.eval_out,
+                            eval_summary=eval_summary)
+    print(f"[score-data] {summary['n_samples']} samples")
+    for action, n in sorted(summary["action_counts"].items()):
+        print(f"  {action}: {n}")
+    print(f"  artifacts: {summary['_artifacts']['dir']}")
+
+
+def _run_filter_data(args) -> None:
+    from .evaluation import filter_dataset
+    res = filter_dataset(args.scores, mode=args.mode, keep_out=args.keep_out,
+                         drop_out=args.drop_out, review_out=args.review_out,
+                         dataset_path=args.dataset)
+    c = res["counts"]
+    print(f"[filter-data] mode={res['mode']}: keep={c['keep']} drop={c['drop']} "
+          f"review={c['review']} unscored={c['unscored']}")
+
+
+def _run_export_data_filter(args) -> None:
+    from .evaluation import filter_dataset
+    run = Path(args.score_run)
+    scores = run / "sample_recommendations.jsonl"
+    if not scores.exists():
+        scores = run / "data_scores" / "sample_recommendations.jsonl"
+    if not scores.exists():
+        sys.exit(f"no sample_recommendations.jsonl under {args.score_run!r}")
+    res = filter_dataset(scores, mode=args.mode, keep_out=args.keep_out,
+                         drop_out=args.drop_out, review_out=args.review_out)
+    c = res["counts"]
+    print(f"[export-data-filter] mode={res['mode']}: keep={c['keep']} drop={c['drop']} "
+          f"review={c['review']} unscored={c['unscored']}")
+
+
 def main(argv=None) -> None:
     args = build_parser().parse_args(argv)
     from .parallel import configure_threads
     threads = configure_threads(args.threads)
     print(f"[atlas] using up to {threads} CPU threads")
-    if args.command == "run-all":
-        _run_all(args)
-    elif args.command == "evaluate":
-        _run_evaluate(args)
-    elif args.command == "compare":
-        _run_compare(args)
+    dispatch = {
+        "run-all": _run_all, "evaluate": _run_evaluate, "compare": _run_compare,
+        "score-data": _run_score_data, "filter-data": _run_filter_data,
+        "export-data-filter": _run_export_data_filter,
+    }
+    handler = dispatch.get(args.command)
+    if handler:
+        handler(args)
     else:
         _run_stage(args.command, args)
 

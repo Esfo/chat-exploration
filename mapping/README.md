@@ -157,8 +157,49 @@ Eval data is kept separate from training data as `.jsonl` (one item per line); s
 
 An item ending in a user turn is answered by the model (and scored for loss
 against `reference_answer`); an item ending in a held-out assistant turn scores
-that turn directly. Data-quality scoring and dataset filtering
-(`score-data` / `filter-data`) are the planned next phase and are not yet wired.
+that turn directly.
+
+## Data scoring & filtering (`atlas score-data` / `filter-data`)
+
+The other half of the feedback loop: decide which *training* rows to keep, fix,
+downsample, drop, or collect more of.
+
+```
+atlas score-data  --model runs/model.pt --dataset data/train.jsonl
+atlas filter-data --scores atlas_eval/data_scores/sample_recommendations.jsonl \
+                  --mode conservative --keep-out train.clean.jsonl --drop-out train.drop.jsonl
+```
+
+`score-data` computes, per row: model-free **text-quality** signals (non-answer,
+prompt-echo, role leakage, scrape artifacts, weird characters, repetition),
+exact + near-duplicate group sizes (a dependency-free MinHash), and
+**assistant-only loss** from the model. It then assigns one action label using
+dataset-relative context (loss percentile, category frequency, per-category
+weakness):
+
+* **KEEP** — clean, useful, on-format.
+* **KEEP_HARD** — high loss but clean and valuable; *not dropped just for being
+  hard*. High loss is only a DROP signal when it co-occurs with quality failures.
+* **DOWNSAMPLE** — clean but duplicated / too easy.
+* **FIX** — good idea, broken structure (bad roles, missing fields).
+* **DROP** — malformed, non-answer, prompt-echo, repetition, artifacts, or exact
+  duplicates.
+* **COLLECT_MORE_LIKE_THIS** — clean, rare category where the model is weak.
+* **REVIEW** — metrics disagree / low confidence.
+
+Outputs under `--eval-out/data_scores/`: `sample_scores.parquet`,
+`sample_recommendations.jsonl`, `category_recommendations.json` (per-category
+COLLECT_MORE / CLEAN_EXISTING / DOWNSAMPLE / HOLD with target counts), and
+`drop_ids.txt` / `keep_ids.txt` / `review_ids.txt` / `collect_more.json`. Pass an
+`--eval-summary` from `atlas evaluate` to fold eval failure rates into the
+collection plan.
+
+`filter-data` routes the original source lines to keep/drop/review files;
+**conservative** (the default) only drops high-confidence DROP rows so the loop
+never deletes hard-but-useful data early. `export-data-filter --score-run DIR`
+does the same straight from a score-data run directory. The Streamlit dashboard
+pages (Model Quality / Compare / Data Quality / Collection Plan) remain a planned
+follow-up.
 
 ### Interactive explorer
 

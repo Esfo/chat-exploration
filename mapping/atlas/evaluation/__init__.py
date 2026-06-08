@@ -28,3 +28,5 @@ from __future__ import annotations
 from .eval_pack import EvalItem, load_eval_pack, validate_item  # noqa: F401
 from .evaluate import evaluate_model, EvalConfig  # noqa: F401
 from .compare import compare_models  # noqa: F401
+from .score_data import score_dataset, ScoreConfig  # noqa: F401
+from .filter_data import filter_dataset  # noqa: F401
