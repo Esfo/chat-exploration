@@ -245,6 +245,31 @@ def build_parser() -> argparse.ArgumentParser:
     cap = sub.add_parser("capture-activations", help="capture firing summaries")
     cap.add_argument("--batch-size", dest="batch_size", type=int, default=None)
 
+    #--- evaluation commands (standalone: operate on a checkpoint directly) ---
+    ev = sub.add_parser("evaluate",
+                        help="evaluate one model on an eval pack (self-checking report)")
+    ev.add_argument("--model-a", "--model", dest="model_a", required=True,
+                    help="model checkpoint / GGUF / Ollama name to evaluate")
+    ev.add_argument("--tokenizer", default=None)
+    ev.add_argument("--eval-pack", dest="eval_pack", required=True,
+                    help="path to a .jsonl eval pack")
+    ev.add_argument("--eval-out", dest="eval_out", default="atlas_eval",
+                    help="base output dir (default: %(default)s)")
+    ev.add_argument("--device", default=None, help="cpu | cuda | auto")
+    ev.add_argument("--dtype", default=None)
+    ev.add_argument("--max-new-tokens", dest="max_new_tokens", type=int, default=None)
+
+    cmp_ = sub.add_parser("compare", help="compare two models on the same eval pack")
+    cmp_.add_argument("--model-a", dest="model_a", required=True)
+    cmp_.add_argument("--model-b", dest="model_b", required=True)
+    cmp_.add_argument("--tokenizer-a", dest="tokenizer_a", default=None)
+    cmp_.add_argument("--tokenizer-b", dest="tokenizer_b", default=None)
+    cmp_.add_argument("--eval-pack", dest="eval_pack", required=True)
+    cmp_.add_argument("--eval-out", dest="eval_out", default="atlas_eval")
+    cmp_.add_argument("--device", default=None)
+    cmp_.add_argument("--dtype", default=None)
+    cmp_.add_argument("--max-new-tokens", dest="max_new_tokens", type=int, default=None)
+
     runall = sub.add_parser("run-all", help="run the full V1 pipeline in order")
     runall.add_argument("--force", action="store_true",
                         help="rerun every stage even if its outputs already exist")
@@ -257,6 +282,53 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _eval_backend(model_path: str, tokenizer_path, args) -> ModelBackend:
+    return ModelBackend(
+        model_path, tokenizer_path or model_path,
+        dtype=args.dtype or "bfloat16", device=args.device or "auto",
+    )
+
+
+def _eval_config(args):
+    from .evaluation.evaluate import EvalConfig
+    cfg = EvalConfig()
+    if getattr(args, "max_new_tokens", None):
+        cfg.max_new_tokens = args.max_new_tokens
+        cfg.per_category_tokens = {}  # uniform budget when overridden
+    return cfg
+
+
+def _run_evaluate(args) -> None:
+    from .evaluation import evaluate_model
+    backend = _eval_backend(args.model_a, args.tokenizer, args)
+    summary = evaluate_model(backend, args.eval_pack, out_dir=args.eval_out,
+                             model_id=args.model_a, cfg=_eval_config(args))
+    m = summary["metrics"]
+    print(f"[evaluate] {summary['model_id']} on {summary['eval_pack']}: "
+          f"{summary['recommendation']}")
+    print(f"  behavior_pass_rate={m['behavior_pass_rate']:.2f} "
+          f"assistant_loss_mean={m['assistant_loss_mean']} "
+          f"format_fail={m['format_failure_rate']:.2f} "
+          f"repetition_fail={m['repetition_failure_rate']:.2f}")
+    print(f"  artifacts: {summary['_artifacts']['dir']}")
+
+
+def _run_compare(args) -> None:
+    from .evaluation import compare_models
+    backend_a = _eval_backend(args.model_a, args.tokenizer_a, args)
+    backend_b = _eval_backend(args.model_b, args.tokenizer_b, args)
+    summary = compare_models(backend_a, backend_b, args.eval_pack,
+                             out_dir=args.eval_out, model_a_id=args.model_a,
+                             model_b_id=args.model_b, cfg=_eval_config(args))
+    wr = summary["win_rate"]
+    print(f"[compare] overall winner: {summary['overall_winner']}")
+    print(f"  win_rate: A={wr['model_a']:.2f} B={wr['model_b']:.2f} tie={wr['tie']:.2f}")
+    print(f"  improvements={summary['improvement_count']} "
+          f"regressions={summary['regression_count']} "
+          f"assistant_loss_delta_mean={summary['assistant_loss_delta_mean']}")
+    print(f"  artifacts: {summary['_artifacts']['dir']}")
+
+
 def main(argv=None) -> None:
     args = build_parser().parse_args(argv)
     from .parallel import configure_threads
@@ -264,6 +336,10 @@ def main(argv=None) -> None:
     print(f"[atlas] using up to {threads} CPU threads")
     if args.command == "run-all":
         _run_all(args)
+    elif args.command == "evaluate":
+        _run_evaluate(args)
+    elif args.command == "compare":
+        _run_compare(args)
     else:
         _run_stage(args.command, args)
 

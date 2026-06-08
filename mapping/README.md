@@ -105,6 +105,61 @@ duckdb /home/sfo/data/models/atlas_library/indexes/atlas.duckdb
 > SELECT * FROM cluster_stats WHERE source_score > 0.7 ORDER BY mean_write_norm DESC;
 ```
 
+## Self-checking evaluation (`atlas evaluate` / `atlas compare`)
+
+The extraction pipeline describes a model's internals; the evaluation harness
+answers the practical question *"is this model actually good, and is B better than
+A?"*. These two commands are **standalone** — they operate on a checkpoint
+directly and do not require a built library:
+
+```
+atlas evaluate --model-a runs/model.pt --eval-pack evals/chat_basic.jsonl
+atlas compare  --model-a runs/old.pt --model-b runs/new.pt --eval-pack evals/chat_basic.jsonl
+```
+
+The harness never collapses everything into one fake "quality score"; it reports
+separate, traceable metric families and a final PASS/WARNING/FAIL recommendation:
+
+* **assistant-only loss** — masks the user prompt and scores only the assistant
+  answer tokens (`assistant_loss`, `assistant_perplexity`, `tokens_scored`), the
+  metric that actually reflects conversational answer quality.
+* **deterministic generation** (temperature 0) + **behaviour / degeneration
+  metrics** — empty/malformed output, role leak, assistant-role loops, repeated
+  lines, 3/5-gram repetition rate, unique-token ratio.
+* **trait checks** — each eval item's `expected_traits` (`should_answer`,
+  `max_words`, `must_include`, `must_not_include`, `requires_code`) become
+  pass/fail checks aggregated into `behavior_pass_rate` and per-reason tables.
+
+`atlas compare` runs both models on the *same* prompts and picks a per-item
+winner from loss **and** behaviour (never loss alone), classifying each item as
+`A_STRONG_WIN` / `A_WEAK_WIN` / `TIE` / `B_WEAK_WIN` / `B_STRONG_WIN` /
+`BOTH_BAD` / `METRICS_DISAGREE`, then writes `comparison_by_item.parquet`,
+per-category win rates, and `regression_cases.jsonl` / `improvement_cases.jsonl`.
+
+Outputs land under `--eval-out` (default `atlas_eval/`):
+
+```
+atlas_eval/eval_runs/<model>/eval_summary.json + eval_by_item.parquet + generations.jsonl
+atlas_eval/comparisons/<a>_vs_<b>/comparison_summary.json + *.parquet + *.jsonl
+```
+
+### Eval packs
+
+Eval data is kept separate from training data as `.jsonl` (one item per line); see
+`evals/` for samples (`chat_basic`, `chat_multi_turn`, `refusal_boundaries`):
+
+```json
+{"id": "chat_basic_000001", "category": "direct_qa", "difficulty": "easy",
+ "messages": [{"role": "user", "content": "Explain overfitting in simple terms."}],
+ "expected_traits": {"should_answer": true, "max_words": 120},
+ "reference_answer": "Overfitting is when a model memorizes training data ..."}
+```
+
+An item ending in a user turn is answered by the model (and scored for loss
+against `reference_answer`); an item ending in a held-out assistant turn scores
+that turn directly. Data-quality scoring and dataset filtering
+(`score-data` / `filter-data`) are the planned next phase and are not yet wired.
+
 ### Interactive explorer
 
 A Streamlit dashboard browses the library without writing SQL — overview, clusters
