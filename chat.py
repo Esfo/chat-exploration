@@ -1,19 +1,20 @@
 """
 interactive inference for a trained model.
 
-loads a model saved by training.save_model (a .pt written when model_output
-is set in main.py), rebuilds the tokenizer from the tokenpath that travelled
-with the model, and lets you chat with it from the terminal.
+loads a model saved by training.save_model (a numbered .pt written into the save
+folder when model_output is set in main.py), rebuilds the tokenizer from the
+tokenpath that travelled with the model, and lets you chat with it from the
+terminal. pass the specific checkpoint you want - higher numbers are later.
 
 note: this is a small base language model trained to continue text, not an
 instruction-tuned assistant. it will continue whatever you type rather than
 answer it conversationally.
 
 usage:
-    python chat.py /home/sfo/data/models/model.pt
-    python chat.py /home/sfo/data/models/model.pt --tokens /path/to/bpe.json
-    python chat.py /home/sfo/data/models/model.pt --max-new-tokens 60
-    python chat.py /home/sfo/data/models/model.pt --temperature 0.7 --top-k 40 --top-p 0.95
+    python chat.py /home/sfo/data/models/model/model_0000005.pt
+    python chat.py /home/sfo/data/models/model/model_0000005.pt --tokens /path/to/bpe.json
+    python chat.py /home/sfo/data/models/model/model_0000005.pt --max-new-tokens 60
+    python chat.py /home/sfo/data/models/model/model_0000005.pt --temperature 0.7 --top-k 40 --top-p 0.95
 """
 
 import argparse
@@ -90,7 +91,7 @@ def main():
 
     print(f"loaded model from {args.model}")
     print(f"vocab_size={cfg.vocab_size} context_length={cfg.context_length} "
-          f"d_model={cfg.d_model} n_layers={cfg.n_layers}")
+          f"layer_widths={cfg.layer_widths} n_layers={cfg.n_layers}")
     print(f"position_enc={'RoPE' if cfg.use_rope else 'learned'} "
           f"mlp={'SwiGLU' if cfg.use_swiglu else 'GELU'} "
           f"device={next(model.parameters()).device}")
