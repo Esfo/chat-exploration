@@ -760,7 +760,11 @@ def generate(
     device=None,
 ):
     """
-    generate text after training, with proper sampling controls:
+    generate a continuation of `prompt` after training, with proper sampling
+    controls. only the newly generated text is returned - the prompt is used as
+    context but not echoed back into the result.
+
+    sampling controls:
 
       temperature        - <1 sharpens (more confident), >1 flattens (more
                            random). set to 0 for greedy (always the most likely
@@ -777,7 +781,16 @@ def generate(
         device = next(model.parameters()).device
 
     model.eval()
-    ids = tokenizer.encode(prompt)
+    #encode the prompt without the trailing EOS: in training EOS separates
+    #paragraphs, so feeding it would make the model start a fresh paragraph
+    #instead of continuing the prompt. an empty prompt has nothing to continue,
+    #so seed it with a lone EOS (a paragraph boundary) to generate from scratch.
+    ids = tokenizer.encode(prompt, add_eos=False)
+    if not ids:
+        ids = [tokenizer.eos_id]
+    #remember where the prompt ends so we return only the newly generated tokens
+    #rather than echoing the prompt back to the user.
+    prompt_length = len(ids)
 
     for _ in range(max_new_tokens):
         #only feed the latest context_length tokens
@@ -827,7 +840,7 @@ def generate(
         next_id = int(torch.multinomial(probs, num_samples=1))
         ids.append(next_id)
 
-    return tokenizer.decode(ids)
+    return tokenizer.decode(ids[prompt_length:])
 
 
 #config fields that describe the model architecture / data and must be saved
