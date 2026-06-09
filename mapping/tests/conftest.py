@@ -79,6 +79,35 @@ class FakeBackend:
                 return rng.standard_normal(shape).astype(np.float32)
         raise KeyError(name)
 
+    #--- evaluation primitives (parity with ModelBackend) -----------------
+    @property
+    def eos_id(self):
+        return self._arch.vocab_size - 1
+
+    def token_logprobs(self, token_ids):
+        """Deterministic per-token log-probs: each next token gets a log-prob that
+        is a smooth function of the (prev, next) id pair, so losses are stable and
+        vary across samples without needing torch."""
+        token_ids = list(token_ids)
+        if len(token_ids) < 2:
+            return []
+        out = []
+        for prev, nxt in zip(token_ids[:-1], token_ids[1:]):
+            lp = -2.0 - 0.5 * abs(float(np.sin(0.13 * prev + 0.07 * nxt)))
+            out.append(lp)
+        return out
+
+    def generate_greedy(self, prompt_ids, max_new_tokens=128, eos_ids=None):
+        """Deterministic 'generation': emit a short varied id sequence derived
+        from the prompt, then stop with eos. Decodes (via FakeTokenizer) to a
+        non-degenerate string so behaviour checks exercise their happy path."""
+        prompt_ids = list(prompt_ids)
+        seed = sum(prompt_ids) % 53 + 7
+        n = min(max_new_tokens, 12)
+        ids = [((seed * (i + 3)) % (self._arch.vocab_size - 2)) + 1 for i in range(n)]
+        ids.append(self.eos_id)
+        return ids
+
     def capture(self, input_ids, attention_mask, layer_callback):
         a = self._arch
         input_ids = np.asarray(input_ids)

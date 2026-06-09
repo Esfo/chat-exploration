@@ -398,6 +398,70 @@ class ModelBackend:
             if idx in captured:
                 layer_callback(idx, captured[idx])
 
+    #--- evaluation primitives -------------------------------------------
+    #These two methods are what the evaluation harness (atlas evaluate / compare)
+    #needs from a model: the per-token log-probability of a known sequence (for
+    #assistant-only loss) and deterministic greedy decoding (for behavioural
+    #checks). They own all torch conversions so the harness stays torch-free and
+    #testable against a fake backend exposing the same surface.
+    @property
+    def eos_id(self) -> int | None:
+        tok = self.tokenizer
+        return getattr(tok, "eos_token_id", None)
+
+    def token_logprobs(self, token_ids) -> list[float]:
+        """Natural-log probability the model assigns to each *next* token.
+
+        Returns a list of length ``len(token_ids) - 1`` where element ``i`` is
+        ``log P(token_ids[i+1] | token_ids[:i+1])``. A single forward pass; no
+        gradients. Used to score full / assistant-only loss without generation.
+        """
+        import torch
+
+        self.load()
+        if len(token_ids) < 2:
+            return []
+        ids = torch.as_tensor([list(token_ids)], dtype=torch.long)
+        try:
+            ids = ids.to(next(self._model.parameters()).device)
+        except StopIteration:
+            pass
+        with torch.no_grad():
+            logits = self._model(input_ids=ids).logits[0]  # [T, vocab]
+        logprobs = torch.log_softmax(logits[:-1].float(), dim=-1)
+        targets = ids[0, 1:]
+        gathered = logprobs.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
+        return gathered.cpu().tolist()
+
+    def generate_greedy(self, prompt_ids, max_new_tokens: int = 128,
+                        eos_ids=None) -> list[int]:
+        """Greedy (temperature 0) continuation of ``prompt_ids``.
+
+        Returns only the newly generated token ids (not the prompt). Stops early
+        when any id in ``eos_ids`` is produced. Deterministic by construction, so
+        evaluation generations are reproducible.
+        """
+        import torch
+
+        self.load()
+        stop = set(eos_ids) if eos_ids is not None else (
+            {self.eos_id} if self.eos_id is not None else set())
+        ids = torch.as_tensor([list(prompt_ids)], dtype=torch.long)
+        try:
+            ids = ids.to(next(self._model.parameters()).device)
+        except StopIteration:
+            pass
+        out: list[int] = []
+        with torch.no_grad():
+            for _ in range(max_new_tokens):
+                logits = self._model(input_ids=ids).logits[0, -1]
+                nxt = int(logits.argmax().item())
+                out.append(nxt)
+                if nxt in stop:
+                    break
+                ids = torch.cat([ids, torch.as_tensor([[nxt]], device=ids.device)], dim=1)
+        return out
+
     def _decoder_layers(self, model=None):
         #Llama: model.model.layers ; fall back to common attribute paths.
         m = model if model is not None else self._model
